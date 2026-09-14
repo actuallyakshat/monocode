@@ -32,6 +32,10 @@ function renameInput(): HTMLInputElement {
   return container.querySelector("input:not([placeholder])")!;
 }
 
+function projectSearchInput(): HTMLInputElement | null {
+  return document.querySelector('input[placeholder="Search projects..."]');
+}
+
 function pressKey(target: HTMLElement, key: string) {
   const event = new KeyboardEvent("keydown", {
     key,
@@ -254,6 +258,22 @@ describe("sidebar session rename", () => {
       "session-1",
       "My draft title",
     );
+  });
+});
+
+describe("sidebar project picker", () => {
+  it("focuses the project search input when opened", () => {
+    props.onSelectProject = vi.fn();
+    act(() => render());
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[aria-label^="Switch project"]',
+    )!;
+    act(() => trigger.click());
+
+    const input = projectSearchInput();
+    expect(input).not.toBeNull();
+    expect(document.activeElement).toBe(input);
   });
 });
 
