@@ -263,6 +263,13 @@ describe("sidebar session rename", () => {
 
 describe("sidebar project picker", () => {
   it("focuses the project search input when opened", () => {
+    // Hold animation frames so the deferred focus retry runs on demand.
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
     props.onSelectProject = vi.fn();
     act(() => render());
 
@@ -273,6 +280,13 @@ describe("sidebar project picker", () => {
 
     const input = projectSearchInput();
     expect(input).not.toBeNull();
+    expect(document.activeElement).toBe(input);
+
+    // Focus lost before the next frame is restored by the retry.
+    act(() => input!.blur());
+    expect(document.activeElement).not.toBe(input);
+    expect(frames).toHaveLength(1);
+    act(() => frames.forEach((frame) => frame(0)));
     expect(document.activeElement).toBe(input);
   });
 });
