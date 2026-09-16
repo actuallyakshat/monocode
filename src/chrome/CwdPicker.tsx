@@ -64,6 +64,10 @@ type Row =
   | { kind: "new-worktree" }
   | { kind: "new-terminal" };
 
+/** Last list read per folder, so reopening the menu paints it on the first
+ *  frame instead of growing once git answers. */
+const WORKTREE_CACHE = new Map<string, GitWorktree[]>();
+
 /** The main worktree is known by its folder, the others by their branch. */
 function worktreeLabel(entry: GitWorktree): string {
   if (entry.main) return basename(entry.path);
@@ -91,7 +95,9 @@ export function CwdPicker({
   const [open, setOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [active, setActive] = useState(0);
-  const [worktrees, setWorktrees] = useState<GitWorktree[]>([]);
+  const [worktrees, setWorktrees] = useState<GitWorktree[]>(
+    () => WORKTREE_CACHE.get(cwd) ?? [],
+  );
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -113,9 +119,11 @@ export function CwdPicker({
     let cancelled = false;
     void gitWorktrees(cwd)
       .then((list) => {
+        WORKTREE_CACHE.set(cwd, list);
         if (!cancelled) setWorktrees(list);
       })
       .catch(() => {
+        WORKTREE_CACHE.delete(cwd);
         if (!cancelled) setWorktrees([]);
       });
     return () => {
@@ -123,7 +131,7 @@ export function CwdPicker({
     };
   }, [cwd, open, showWorktrees]);
   useEffect(() => {
-    setWorktrees([]);
+    setWorktrees(WORKTREE_CACHE.get(cwd) ?? []);
   }, [cwd]);
   // The current folder is the menu header, and a worktree opened earlier is
   // also a recent project; list each one once, under Worktrees.
@@ -216,6 +224,8 @@ export function CwdPicker({
     setCreateError(null);
     try {
       const path = await gitAddWorktree(cwd, branch);
+      // The repository has one more worktree than the cached list knows.
+      WORKTREE_CACHE.delete(cwd);
       notifyGitChanged();
       setCreating(false);
       setCreateBusy(false);

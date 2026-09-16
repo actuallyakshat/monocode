@@ -3555,7 +3555,9 @@ fn git_worktrees_for(root: &Path) -> Vec<GitWorktree> {
     };
     let mut out: Vec<GitWorktree> = Vec::new();
     let mut saw_bare = false;
-    // Records are blank-line separated; `worktree <path>` opens each one.
+    // Records are blank-line separated; `worktree <path>` opens each one. Git
+    // writes `\n`, but a `\r\n` build would merge every record into one.
+    let text = text.replace("\r\n", "\n");
     for record in text.split("\n\n") {
         let mut path: Option<PathBuf> = None;
         let mut branch = None;
