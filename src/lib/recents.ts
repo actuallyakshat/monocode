@@ -29,6 +29,20 @@ export function sameProjectPath(a: string, b: string): boolean {
   return pathKey(a) === pathKey(b);
 }
 
+/** Linked worktrees git reported this session. A worktree is another folder of
+ *  a repository already in the rail, so recording it would list one project
+ *  twice under two names. Read from git, never saved, so it cannot go stale. */
+const LINKED_WORKTREES = new Set<string>();
+
+/** Called with the linked worktrees of a repository, the main one excluded. */
+export function markLinkedWorktrees(paths: string[]) {
+  for (const path of paths) LINKED_WORKTREES.add(pathKey(normalize(path)));
+}
+
+export function isLinkedWorktree(path: string): boolean {
+  return LINKED_WORKTREES.has(pathKey(normalize(path)));
+}
+
 export function loadRecents(): RecentProject[] {
   try {
     const raw = localStorage.getItem(KEY);
@@ -63,8 +77,13 @@ function save(next: RecentProject[]) {
 export function rememberProject(path: string): RecentProject[] {
   const normalized = normalize(path);
   if (normalized === "~") return loadRecents();
+  // The worktree's repository is already listed; the composer chip names the
+  // worktree the chat runs in.
+  if (isLinkedWorktree(normalized)) return loadRecents();
   dropArchived(normalized);
-  const prev = loadRecents().filter((p) => !sameProjectPath(p.path, normalized));
+  const prev = loadRecents().filter(
+    (p) => !sameProjectPath(p.path, normalized),
+  );
   const next = [{ path: normalized, openedAt: Date.now() }, ...prev].slice(
     0,
     MAX,
@@ -76,10 +95,14 @@ export function rememberProject(path: string): RecentProject[] {
 /** Drops a project from the rail: its recent entry, saved order slot, and pin. */
 function dropFromRail(path: string): RecentProject[] {
   const normalized = normalize(path);
-  const next = loadRecents().filter((item) => !sameProjectPath(item.path, normalized));
+  const next = loadRecents().filter(
+    (item) => !sameProjectPath(item.path, normalized),
+  );
   save(next);
   saveProjectRailOrder(
-    loadProjectRailOrder().filter((entry) => !sameProjectPath(entry, normalized)),
+    loadProjectRailOrder().filter(
+      (entry) => !sameProjectPath(entry, normalized),
+    ),
   );
   savePinnedProjects(
     loadPinnedProjects().filter((entry) => !sameProjectPath(entry, normalized)),

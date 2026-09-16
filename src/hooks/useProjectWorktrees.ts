@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { basename, gitWorktrees, type GitWorktree } from "../lib/fs";
+import { markLinkedWorktrees } from "../lib/recents";
 
 /** Last list read per folder, so a second pane on the same project paints it
  *  on the first frame instead of growing once git answers. */
@@ -27,6 +28,10 @@ function read(cwd: string): Promise<GitWorktree[]> {
   const next = gitWorktrees(cwd)
     .then((list) => {
       CACHE.set(cwd, list);
+      // Keep the repository's other folders out of the project rail.
+      markLinkedWorktrees(
+        list.filter((entry) => !entry.main).map((entry) => entry.path),
+      );
       return list;
     })
     .catch(() => {

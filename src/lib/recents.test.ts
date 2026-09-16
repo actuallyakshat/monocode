@@ -7,6 +7,7 @@ import {
   loadProjectRailOrder,
   loadRecents,
   looksLikeProject,
+  markLinkedWorktrees,
   projectRailItems,
   projectRailSections,
   rememberProject,
@@ -199,5 +200,15 @@ describe("archiveProject", () => {
     forgetProject("/tmp/gone");
     expect(loadArchivedProjects()).toEqual([]);
     expect(loadRecents()).toEqual([]);
+  });
+
+  it("keeps a linked worktree out of the rail", () => {
+    markLinkedWorktrees(["/tmp/repo-feat-a"]);
+    rememberProject("/tmp/repo");
+    rememberProject("/tmp/repo-feat-a");
+
+    // The worktree is another folder of /tmp/repo, and the composer chip
+    // already names it; the rail lists the repository once.
+    expect(loadRecents().map((item) => item.path)).toEqual(["/tmp/repo"]);
   });
 });
