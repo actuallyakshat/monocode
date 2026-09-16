@@ -92,7 +92,9 @@ export function BranchPicker({
   }, [open]);
 
   useEffect(() => {
-    if (open) search.current?.focus();
+    if (!open) return;
+    const id = requestAnimationFrame(() => search.current?.focus());
+    return () => cancelAnimationFrame(id);
   }, [open]);
 
   useEffect(() => {
