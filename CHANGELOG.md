@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- The project picker lists the repository's git worktrees and switches the chat's folder to the one you pick, so a worktree opened earlier can be continued in a new chat. New worktree adds a branch checkout beside the main project folder and moves the chat into it, leaving the other chats where they are. Closes #249.
+- A worktree chip sits beside the branch chip in the composer. It names the worktree the chat runs in, lists the repository's other worktrees to switch to, and creates a new one from a branch name. The new worktree is a folder beside the main project, so parallel chats stop switching each other's branch. The sidebar project picker lists the same worktrees. Closes #249.
 
 ## [0.1.48] - 2026-09-16
 

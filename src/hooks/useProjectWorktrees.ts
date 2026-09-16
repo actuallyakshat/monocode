@@ -1,14 +1,17 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { basename, gitWorktrees, type GitWorktree } from "../lib/fs";
 
-/** Last list read per folder, so reopening a picker paints it on the first
- *  frame instead of growing once git answers. */
+/** Last list read per folder, so a second picker on the same project paints it
+ *  on the first frame instead of growing once git answers. */
 const CACHE = new Map<string, GitWorktree[]>();
+/** One `git worktree list` per folder, however many panes ask at once. */
+const IN_FLIGHT = new Map<string, Promise<GitWorktree[]>>();
 
 /** Called after adding a worktree: the repository now has one more than the
  *  cached list knows. */
 export function forgetProjectWorktrees(cwd: string) {
   CACHE.delete(cwd);
+  IN_FLIGHT.delete(cwd);
 }
 
 /** The main worktree is known by its folder, the others by their branch. */
@@ -18,19 +21,41 @@ export function worktreeLabel(entry: GitWorktree): string {
   return entry.detached ? "detached HEAD" : basename(entry.path);
 }
 
+function read(cwd: string): Promise<GitWorktree[]> {
+  const pending = IN_FLIGHT.get(cwd);
+  if (pending) return pending;
+  const next = gitWorktrees(cwd)
+    .then((list) => {
+      CACHE.set(cwd, list);
+      return list;
+    })
+    .catch(() => {
+      CACHE.delete(cwd);
+      return [];
+    })
+    .finally(() => {
+      IN_FLIGHT.delete(cwd);
+    });
+  IN_FLIGHT.set(cwd, next);
+  return next;
+}
+
 export type ProjectWorktrees = {
+  /** Every working tree of this repository, the main one first. */
+  all: GitWorktree[];
   /** Worktrees other than the one `cwd` is already inside. */
   others: GitWorktree[];
-  /** Git answered with at least one worktree, so a worktree can be added. */
+  /** The working tree `cwd` is inside, when git reported one. */
+  current: GitWorktree | null;
+  /** Git answered with at least one worktree, so this folder is a repository. */
   isRepo: boolean;
+  /** Reload after adding a worktree elsewhere. */
+  refresh: () => void;
 };
 
-const NONE: ProjectWorktrees = { others: [], isRepo: false };
-
 /**
- * Worktrees of `cwd`. They are only needed while a picker is open, so they are
- * read on each open rather than kept in a subscription the way the branch list
- * is.
+ * Worktrees of `cwd`. Git is asked once per folder and the answer is cached, so
+ * several pickers on one project share a single lookup.
  */
 export function useProjectWorktrees(
   cwd: string,
@@ -39,6 +64,7 @@ export function useProjectWorktrees(
   const [worktrees, setWorktrees] = useState<GitWorktree[]>(
     () => CACHE.get(cwd) ?? [],
   );
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
     setWorktrees(CACHE.get(cwd) ?? []);
@@ -47,23 +73,27 @@ export function useProjectWorktrees(
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    void gitWorktrees(cwd)
-      .then((list) => {
-        CACHE.set(cwd, list);
-        if (!cancelled) setWorktrees(list);
-      })
-      .catch(() => {
-        CACHE.delete(cwd);
-        if (!cancelled) setWorktrees([]);
-      });
+    void read(cwd).then((list) => {
+      if (!cancelled) setWorktrees(list);
+    });
     return () => {
       cancelled = true;
     };
-  }, [cwd, enabled]);
+  }, [cwd, enabled, revision]);
 
-  if (!enabled) return NONE;
+  const refresh = useCallback(() => {
+    forgetProjectWorktrees(cwd);
+    setRevision((value) => value + 1);
+  }, [cwd]);
+
+  if (!enabled) {
+    return { all: [], others: [], current: null, isRepo: false, refresh };
+  }
   return {
+    all: worktrees,
     others: worktrees.filter((entry) => !entry.current),
+    current: worktrees.find((entry) => entry.current) ?? null,
     isRepo: worktrees.length > 0,
+    refresh,
   };
 }

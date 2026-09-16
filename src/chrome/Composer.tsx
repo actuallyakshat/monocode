@@ -92,6 +92,7 @@ import { ContextMeter } from "./ContextMeter";
 import { AttachmentChip } from "./AttachmentChip";
 import { BranchPicker } from "./BranchPicker";
 import { CwdPicker } from "./CwdPicker";
+import { WorktreePicker } from "./WorktreePicker";
 import { FileMentionPicker } from "./FileMentionPicker";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { InboxMiniCard } from "./InboxMiniCard";
@@ -1326,6 +1327,14 @@ export function Composer({
                   branch={branch}
                   enabled={enabled && !busy}
                   onChange={onBranchChange}
+                  onClose={() => ref.current?.focus()}
+                />
+              )}
+              {hideBranchPicker ? null : (
+                <WorktreePicker
+                  cwd={cwd}
+                  enabled={enabled && !busy}
+                  onCwdChange={onCwdChange}
                   onClose={() => ref.current?.focus()}
                 />
               )}
