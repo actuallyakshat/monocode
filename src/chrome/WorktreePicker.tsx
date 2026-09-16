@@ -28,7 +28,6 @@ type Props = {
 };
 
 const MENU_WIDTH = 280;
-const MENU_MIN_HEIGHT = 140;
 const MENU_MAX_HEIGHT = 280;
 
 type Row = { kind: "worktree"; entry: GitWorktree } | { kind: "create" };
@@ -161,7 +160,6 @@ export function WorktreePicker({
           anchor={root}
           side="top"
           width={MENU_WIDTH}
-          minHeight={MENU_MIN_HEIGHT}
           maxHeight={MENU_MAX_HEIGHT}
           onDismiss={(reason) => dismiss(reason === "escape")}
           onKeyDown={onMenuKey}
@@ -171,11 +169,29 @@ export function WorktreePicker({
           className="flex flex-col overflow-hidden"
         >
           <WorktreeList
-            rows={rows}
+            entries={all}
             active={active}
             onActive={setActive}
-            onPick={pick}
+            onPick={(entry) => pick({ kind: "worktree", entry })}
           />
+          <div className="shrink-0 border-t border-stroke p-1.5">
+            <button
+              type="button"
+              role="option"
+              aria-selected={false}
+              onMouseDown={(e) => e.preventDefault()}
+              onMouseEnter={() => setActive(all.length)}
+              onClick={() => pick({ kind: "create" })}
+              className={`flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left ${
+                active === all.length
+                  ? "bg-selection-hover text-content"
+                  : "text-content/75 hover:bg-selection-hover hover:text-content"
+              }`}
+            >
+              <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+              <span className="min-w-0 truncate text-[12px]">New worktree</span>
+            </button>
+          </div>
         </Popover>
       ) : null}
       {creating ? (
@@ -197,15 +213,15 @@ export function WorktreePicker({
 }
 
 function WorktreeList({
-  rows,
+  entries,
   active,
   onActive,
   onPick,
 }: {
-  rows: Row[];
+  entries: GitWorktree[];
   active: number;
   onActive: (index: number) => void;
-  onPick: (row: Row) => void;
+  onPick: (entry: GitWorktree) => void;
 }) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const activeRef = useRef<HTMLButtonElement>(null);
@@ -219,61 +235,54 @@ function WorktreeList({
       ref={lockOverscroll}
       role="listbox"
       aria-label="Worktrees"
-      className="min-h-0 flex-1 overflow-y-auto overscroll-none px-1.5 py-1.5"
+      className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-none p-1.5"
     >
-      {rows.map((row, index) => {
+      {entries.map((entry, index) => {
         const highlighted = index === active;
-        const selected = row.kind === "worktree" && row.entry.current;
+        const label = worktreeLabel(entry);
+        const folder = basename(entry.path);
+        // The label is already the folder for the main worktree, and a
+        // worktree named after its branch repeats it in the path.
+        const meta = entry.main ? null : folder === label ? null : folder;
         return (
           <button
-            key={row.kind === "create" ? "create" : row.entry.path}
+            key={entry.path}
             ref={highlighted ? activeRef : undefined}
             type="button"
             role="option"
-            aria-selected={selected}
-            title={row.kind === "create" ? undefined : row.entry.path}
+            aria-selected={entry.current}
+            title={entry.path}
             onMouseDown={(e) => e.preventDefault()}
             onMouseEnter={() => onActive(index)}
-            onClick={() => onPick(row)}
-            className={
-              row.kind === "create"
-                ? `mt-1 flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left ${
-                    highlighted
-                      ? "bg-selection-hover text-content"
-                      : "bg-selection text-content hover:bg-selection-hover"
-                  }`
-                : `flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${
-                    highlighted || selected
-                      ? "bg-selection text-content"
-                      : "text-content hover:bg-content/5"
-                  }`
-            }
+            onClick={() => onPick(entry)}
+            // Pointing at a row and being in it are different states, so the
+            // hover fill has to sit above the selected one, not equal it.
+            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
+              highlighted
+                ? "bg-selection-hover text-content"
+                : entry.current
+                  ? "bg-selection-subtle text-content"
+                  : "text-content/75 hover:bg-selection-hover hover:text-content"
+            }`}
           >
-            {row.kind === "create" ? (
-              <>
-                <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
-                <span className="min-w-0 truncate text-[12px]">
-                  New worktree
-                </span>
-              </>
-            ) : (
-              <>
-                {selected ? (
-                  <Check className="size-3.5 shrink-0" strokeWidth={1.75} />
-                ) : (
-                  <FolderTree
-                    className="size-3.5 shrink-0 text-content/50"
-                    strokeWidth={1.75}
-                  />
-                )}
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                  {worktreeLabel(row.entry)}
-                </span>
-                <span className="shrink-0 text-[10px] text-content/40">
-                  {row.entry.main ? "main" : basename(row.entry.path)}
-                </span>
-              </>
-            )}
+            <span className="grid size-3.5 shrink-0 place-items-center">
+              {entry.current ? (
+                <Check className="size-3.5" strokeWidth={1.75} />
+              ) : (
+                <FolderTree
+                  className="size-3.5 text-content/45"
+                  strokeWidth={1.75}
+                />
+              )}
+            </span>
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
+              {label}
+            </span>
+            {meta ? (
+              <span className="max-w-24 shrink-0 truncate font-mono text-[10px] text-content/35">
+                {meta}
+              </span>
+            ) : null}
           </button>
         );
       })}

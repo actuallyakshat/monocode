@@ -71,9 +71,9 @@ async function openMenu() {
 }
 
 function option(label: string): HTMLButtonElement | undefined {
-  return [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(
-    (item) => item.textContent?.includes(label),
-  );
+  return [
+    ...document.querySelectorAll<HTMLButtonElement>('[role="option"]'),
+  ].find((item) => item.textContent?.includes(label));
 }
 
 it("shows the current worktree beside the branch and switches folders", async () => {
@@ -115,14 +115,37 @@ it("creates a worktree and moves the session into it", async () => {
     setter.call(input, "feat/next");
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  const create = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
-    (button) => button.textContent?.includes("Create worktree"),
-  )!;
+  const create = [
+    ...document.querySelectorAll<HTMLButtonElement>("button"),
+  ].find((button) => button.textContent?.includes("Create worktree"))!;
   await act(async () => create.click());
   await act(async () => {});
 
   expect(worktrees.add).toHaveBeenCalledWith("/work/repo", "feat/next");
   expect(onCwdChange).toHaveBeenCalledWith("/work/repo-feat-next");
+});
+
+it("fills a pointed-at row differently from the one it is already in", async () => {
+  await render(vi.fn());
+  await openMenu();
+
+  const selected = option("repo")!;
+  const other = option("feat/picker")!;
+  // Keyboard focus starts on the row we are in, so move it off before
+  // comparing; otherwise both states land on the same row.
+  await act(async () =>
+    document.querySelector('[role="dialog"]')!.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    ),
+  );
+
+  expect(selected.className).toContain("bg-selection-subtle");
+  expect(other.className).toContain("bg-selection-hover");
+  expect(selected.className).not.toContain("bg-selection-hover");
 });
 
 it("renders nothing outside a git repository", async () => {
