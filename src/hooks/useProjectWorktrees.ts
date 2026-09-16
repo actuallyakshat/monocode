@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { basename, gitWorktrees, type GitWorktree } from "../lib/fs";
 
-/** Last list read per folder, so a second picker on the same project paints it
+/** Last list read per folder, so a second pane on the same project paints it
  *  on the first frame instead of growing once git answers. */
 const CACHE = new Map<string, GitWorktree[]>();
 /** One `git worktree list` per folder, however many panes ask at once. */
@@ -43,8 +43,6 @@ function read(cwd: string): Promise<GitWorktree[]> {
 export type ProjectWorktrees = {
   /** Every working tree of this repository, the main one first. */
   all: GitWorktree[];
-  /** Worktrees other than the one `cwd` is already inside. */
-  others: GitWorktree[];
   /** The working tree `cwd` is inside, when git reported one. */
   current: GitWorktree | null;
   /** Git answered with at least one worktree, so this folder is a repository. */
@@ -55,7 +53,7 @@ export type ProjectWorktrees = {
 
 /**
  * Worktrees of `cwd`. Git is asked once per folder and the answer is cached, so
- * several pickers on one project share a single lookup.
+ * several panes on one project share a single lookup.
  */
 export function useProjectWorktrees(
   cwd: string,
@@ -87,11 +85,10 @@ export function useProjectWorktrees(
   }, [cwd]);
 
   if (!enabled) {
-    return { all: [], others: [], current: null, isRepo: false, refresh };
+    return { all: [], current: null, isRepo: false, refresh };
   }
   return {
     all: worktrees,
-    others: worktrees.filter((entry) => !entry.current),
     current: worktrees.find((entry) => entry.current) ?? null,
     isRepo: worktrees.length > 0,
     refresh,
