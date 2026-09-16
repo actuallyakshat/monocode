@@ -6,13 +6,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
-import {
-  basename,
-  gitAddWorktree,
-  gitWorktrees,
-  notifyGitChanged,
-  type GitWorktree,
-} from "../lib/fs";
+import { basename, gitAddWorktree, notifyGitChanged } from "../lib/fs";
 import { prettyCwd, prettyParent } from "../lib/paths";
 import {
   looksLikeProject,
@@ -21,6 +15,11 @@ import {
   type RecentProject,
 } from "../lib/recents";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
+import {
+  forgetProjectWorktrees,
+  useProjectWorktrees,
+  worktreeLabel,
+} from "../hooks/useProjectWorktrees";
 import { LAYER } from "../lib/layers";
 import { NewWorktreeDialog } from "./NewWorktreeDialog";
 import { Popover } from "./Popover";
@@ -64,17 +63,6 @@ type Row =
   | { kind: "new-worktree" }
   | { kind: "new-terminal" };
 
-/** Last list read per folder, so reopening the menu paints it on the first
- *  frame instead of growing once git answers. */
-const WORKTREE_CACHE = new Map<string, GitWorktree[]>();
-
-/** The main worktree is known by its folder, the others by their branch. */
-function worktreeLabel(entry: GitWorktree): string {
-  if (entry.main) return basename(entry.path);
-  if (entry.branch) return entry.branch;
-  return entry.detached ? "detached HEAD" : basename(entry.path);
-}
-
 export function CwdPicker({
   cwd,
   recents,
@@ -95,9 +83,6 @@ export function CwdPicker({
   const [open, setOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [active, setActive] = useState(0);
-  const [worktrees, setWorktrees] = useState<GitWorktree[]>(
-    () => WORKTREE_CACHE.get(cwd) ?? [],
-  );
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -111,33 +96,13 @@ export function CwdPicker({
 
   const inProject = looksLikeProject(cwd);
   const label = prettyCwd(cwd);
-  // Worktrees are only needed while the menu is open, so they are read on each
-  // open rather than kept in a subscription the way the branch list is.
   const showWorktrees = mode === "switch" && inProject;
-  useEffect(() => {
-    if (!open || !showWorktrees) return;
-    let cancelled = false;
-    void gitWorktrees(cwd)
-      .then((list) => {
-        WORKTREE_CACHE.set(cwd, list);
-        if (!cancelled) setWorktrees(list);
-      })
-      .catch(() => {
-        WORKTREE_CACHE.delete(cwd);
-        if (!cancelled) setWorktrees([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [cwd, open, showWorktrees]);
-  useEffect(() => {
-    setWorktrees(WORKTREE_CACHE.get(cwd) ?? []);
-  }, [cwd]);
+  const { others: otherWorktrees, isRepo } = useProjectWorktrees(
+    cwd,
+    open && showWorktrees,
+  );
   // The current folder is the menu header, and a worktree opened earlier is
   // also a recent project; list each one once, under Worktrees.
-  const otherWorktrees = showWorktrees
-    ? worktrees.filter((entry) => !entry.current)
-    : [];
   const isWorktreePath = (path: string) =>
     otherWorktrees.some((entry) => sameProjectPath(entry.path, path));
   // Read the saved rail order on opening, including changes made while Notes is open.
@@ -157,7 +122,7 @@ export function CwdPicker({
     if (mode === "move") activeRef.current?.scrollIntoView({ block: "nearest" });
   }, [active, open, mode]);
 
-  const canAddWorktree = showWorktrees && worktrees.length > 0;
+  const canAddWorktree = isRepo;
   // Keyboard order has to match the rendered order: worktrees, recents, the
   // More submenu, then the footer actions.
   const rows: Row[] = [
@@ -224,8 +189,7 @@ export function CwdPicker({
     setCreateError(null);
     try {
       const path = await gitAddWorktree(cwd, branch);
-      // The repository has one more worktree than the cached list knows.
-      WORKTREE_CACHE.delete(cwd);
+      forgetProjectWorktrees(cwd);
       notifyGitChanged();
       setCreating(false);
       setCreateBusy(false);

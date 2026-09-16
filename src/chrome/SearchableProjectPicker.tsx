@@ -5,7 +5,17 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
-import { basename } from "../lib/fs";
+import {
+  forgetProjectWorktrees,
+  useProjectWorktrees,
+  worktreeLabel,
+} from "../hooks/useProjectWorktrees";
+import {
+  basename,
+  gitAddWorktree,
+  notifyGitChanged,
+  type GitWorktree,
+} from "../lib/fs";
 import { prettyParent, projectKey, projectName } from "../lib/paths";
 import {
   looksLikeProject,
@@ -23,7 +33,8 @@ import {
   resolveTabGroupLogo,
   resolveTabGroupMascot,
 } from "../lib/tabGroups";
-import { Check, ChevronDown, Plus, Search } from "./icons";
+import { Check, ChevronDown, GitBranch, Plus, Search } from "./icons";
+import { NewWorktreeDialog } from "./NewWorktreeDialog";
 import { Popover } from "./Popover";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { ProjectMascot } from "./ProjectMascot";
@@ -41,6 +52,10 @@ type Props = {
   onOpenProject?: () => void;
 };
 
+type Row =
+  | { kind: "project"; path: string }
+  | { kind: "worktree"; entry: GitWorktree };
+
 export function SearchableProjectPicker({
   cwd,
   recents,
@@ -55,6 +70,9 @@ export function SearchableProjectPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const [groupLabels] = useState(loadTabGroupLabels);
@@ -94,6 +112,32 @@ export function SearchableProjectPicker({
       })
     : orderedProjects;
 
+  const { others: worktrees, isRepo } = useProjectWorktrees(
+    cwd,
+    open && mode === "switch" && inProject,
+  );
+  const filteredWorktrees = normalizedQuery
+    ? worktrees.filter((entry) =>
+        `${worktreeLabel(entry)}\n${entry.path}`
+          .toLocaleLowerCase()
+          .includes(normalizedQuery),
+      )
+    : worktrees;
+  // A worktree opened earlier is also a recent project; list each one once,
+  // under Worktrees.
+  const listedProjects = filteredProjects.filter(
+    (item) =>
+      !filteredWorktrees.some((entry) =>
+        sameProjectPath(entry.path, item.path),
+      ),
+  );
+  // Keyboard order has to match the rendered order. "New worktree" and "New
+  // project" sit in the footer and are reached by pointer, like today.
+  const rows: Row[] = [
+    ...listedProjects.map((item): Row => ({ kind: "project", path: item.path })),
+    ...filteredWorktrees.map((entry): Row => ({ kind: "worktree", entry })),
+  ];
+
   const closePicker = () => {
     setOpen(false);
     setQuery("");
@@ -120,12 +164,39 @@ export function SearchableProjectPicker({
     if (!sameProjectPath(path, cwd)) onSelectProject(path);
   };
 
+  const pickRow = (row: Row | undefined) => {
+    if (!row) return;
+    if (row.kind === "worktree") {
+      closePicker();
+      onSelectProject(row.entry.path);
+      return;
+    }
+    pickProject(row.path);
+  };
+
+  const createWorktree = async (branch: string) => {
+    if (createBusy) return;
+    setCreateBusy(true);
+    setCreateError(null);
+    try {
+      const path = await gitAddWorktree(cwd, branch);
+      forgetProjectWorktrees(cwd);
+      notifyGitChanged();
+      setCreating(false);
+      setCreateBusy(false);
+      onSelectProject(path);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err));
+      setCreateBusy(false);
+    }
+  };
+
   const onPickerKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (!(event.target instanceof HTMLInputElement)) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      if (filteredProjects.length === 0) return;
-      setActive((index) => Math.min(filteredProjects.length - 1, index + 1));
+      if (rows.length === 0) return;
+      setActive((index) => Math.min(rows.length - 1, index + 1));
       return;
     }
     if (event.key === "ArrowUp") {
@@ -134,10 +205,10 @@ export function SearchableProjectPicker({
       return;
     }
     if (event.key === "Enter") {
-      const project = filteredProjects[active];
-      if (!project) return;
+      const row = rows[active];
+      if (!row) return;
       event.preventDefault();
-      pickProject(project.path);
+      pickRow(row);
     }
   };
 
@@ -228,8 +299,8 @@ export function SearchableProjectPicker({
             />
           </label>
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-none p-1.5">
-            {filteredProjects.length > 0 ? (
-              filteredProjects.map((item, index) => {
+            {rows.length > 0 ? (
+              listedProjects.map((item, index) => {
                 const current = sameProjectPath(item.path, cwd);
                 const itemKey = projectKey(item.path);
                 const itemSeed = projectName(item.path);
@@ -290,23 +361,87 @@ export function SearchableProjectPicker({
                 No projects found
               </p>
             )}
+            {filteredWorktrees.length > 0 ? (
+              <>
+                <p className="px-2.5 pb-1 pt-2 text-[10px] uppercase tracking-widest text-content/45">
+                  Worktrees
+                </p>
+                {filteredWorktrees.map((entry, offset) => {
+                  const index = listedProjects.length + offset;
+                  return (
+                    <button
+                      key={entry.path}
+                      type="button"
+                      title={entry.path}
+                      onMouseEnter={() => setActive(index)}
+                      onClick={() => pickRow({ kind: "worktree", entry })}
+                      className={`flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left ${
+                        active === index
+                          ? "bg-selection text-content"
+                          : "text-content/75 hover:bg-content/5 hover:text-content"
+                      }`}
+                    >
+                      <span className="grid size-4 shrink-0 place-items-center">
+                        <GitBranch className="size-3.5" strokeWidth={1.75} />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
+                        {worktreeLabel(entry)}
+                      </span>
+                      <span className="max-w-44 shrink truncate font-mono text-[11px] text-content/40">
+                        {entry.main ? "main worktree" : basename(entry.path)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </>
+            ) : null}
           </div>
-          {onOpenProject ? (
+          {onOpenProject || isRepo ? (
             <div className="shrink-0 border-t border-stroke p-1.5">
-              <button
-                type="button"
-                onClick={() => {
-                  closePicker();
-                  onOpenProject();
-                }}
-                className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8 hover:text-content"
-              >
-                <Plus className="size-4 shrink-0" strokeWidth={1.75} />
-                <span>New project</span>
-              </button>
+              {isRepo ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    closePicker();
+                    setCreateError(null);
+                    setCreateBusy(false);
+                    setCreating(true);
+                  }}
+                  className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8 hover:text-content"
+                >
+                  <GitBranch className="size-4 shrink-0" strokeWidth={1.75} />
+                  <span>New worktree</span>
+                </button>
+              ) : null}
+              {onOpenProject ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    closePicker();
+                    onOpenProject();
+                  }}
+                  className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8 hover:text-content"
+                >
+                  <Plus className="size-4 shrink-0" strokeWidth={1.75} />
+                  <span>New project</span>
+                </button>
+              ) : null}
             </div>
           ) : null}
         </Popover>
+      ) : null}
+      {creating ? (
+        <NewWorktreeDialog
+          cwd={cwd}
+          busy={createBusy}
+          error={createError}
+          onCreate={(branch) => void createWorktree(branch)}
+          onCancel={() => {
+            if (createBusy) return;
+            setCreating(false);
+            setCreateError(null);
+          }}
+        />
       ) : null}
     </div>
   );
