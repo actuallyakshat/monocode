@@ -45,7 +45,6 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
-  localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
