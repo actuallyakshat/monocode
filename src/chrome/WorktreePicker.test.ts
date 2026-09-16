@@ -15,6 +15,7 @@ vi.mock("../lib/fs", async (importOriginal) => ({
 
 import { WorktreePicker } from "./WorktreePicker";
 import { forgetProjectWorktrees } from "../hooks/useProjectWorktrees";
+import { isLinkedWorktree } from "../lib/recents";
 
 const MAIN: GitWorktree = {
   path: "/work/repo",
@@ -87,6 +88,9 @@ it("shows the current worktree beside the branch and switches folders", async ()
 
   await act(async () => option("feat/picker")!.click());
   expect(onCwdChange).toHaveBeenCalledWith("/work/repo-feat-picker");
+  // The rail already lists the repository; the worktree is one of its folders,
+  // not a second project.
+  expect(isLinkedWorktree("/work/repo-feat-picker")).toBe(true);
 });
 
 it("does not switch when the current worktree is chosen again", async () => {

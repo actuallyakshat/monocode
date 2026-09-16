@@ -207,8 +207,15 @@ describe("archiveProject", () => {
     rememberProject("/tmp/repo");
     rememberProject("/tmp/repo-feat-a");
 
+    // A folder nobody marked is still a project, so the guard is not simply
+    // dropping every path.
+    rememberProject("/tmp/repo-other");
+
     // The worktree is another folder of /tmp/repo, and the composer chip
     // already names it; the rail lists the repository once.
-    expect(loadRecents().map((item) => item.path)).toEqual(["/tmp/repo"]);
+    expect(loadRecents().map((item) => item.path)).toEqual([
+      "/tmp/repo-other",
+      "/tmp/repo",
+    ]);
   });
 });

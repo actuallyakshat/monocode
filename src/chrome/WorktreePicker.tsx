@@ -12,6 +12,7 @@ import {
   type GitWorktree,
 } from "../lib/fs";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
+import { markLinkedWorktrees } from "../lib/recents";
 import {
   useProjectWorktrees,
   worktreeLabel,
@@ -86,6 +87,9 @@ export function WorktreePicker({
       return;
     }
     dismiss(true);
+    // The chat moves to another folder of a repository the rail already
+    // lists, so the folder is not a second project.
+    markLinkedWorktrees([row.entry.path]);
     onCwdChange(row.entry.path);
   };
 
@@ -99,6 +103,7 @@ export function WorktreePicker({
       notifyGitChanged();
       setCreating(false);
       setCreateBusy(false);
+      markLinkedWorktrees([path]);
       onCwdChange(path);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err));
