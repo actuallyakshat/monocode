@@ -1,13 +1,18 @@
-import { ChevronDown, ChevronRight } from "./icons";
+import { ChevronDown, ChevronRight, GitBranch, Plus } from "./icons";
 import {
   useEffect,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
-import { basename } from "../lib/fs";
+import {
+  basename,
+  gitAddWorktree,
+  gitWorktrees,
+  notifyGitChanged,
+  type GitWorktree,
+} from "../lib/fs";
 import { prettyCwd, prettyParent } from "../lib/paths";
 import {
   looksLikeProject,
@@ -17,6 +22,7 @@ import {
 } from "../lib/recents";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { LAYER } from "../lib/layers";
+import { NewWorktreeDialog } from "./NewWorktreeDialog";
 import { Popover } from "./Popover";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { MOD } from "../lib/platform";
@@ -52,9 +58,18 @@ const HOVER_CLOSE_MS = 100;
 const SELF = "[data-cwd-picker],[data-cwd-submenu]";
 
 type Row =
+  | { kind: "worktree"; path: string }
   | { kind: "recent"; path: string }
   | { kind: "more" }
+  | { kind: "new-worktree" }
   | { kind: "new-terminal" };
+
+/** The main worktree is known by its folder, the others by their branch. */
+function worktreeLabel(entry: GitWorktree): string {
+  if (entry.main) return basename(entry.path);
+  if (entry.branch) return entry.branch;
+  return entry.detached ? "detached HEAD" : basename(entry.path);
+}
 
 export function CwdPicker({
   cwd,
@@ -76,6 +91,10 @@ export function CwdPicker({
   const [open, setOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const [worktrees, setWorktrees] = useState<GitWorktree[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLButtonElement>(null);
   const activeRef = useRef<HTMLButtonElement>(null);
@@ -86,11 +105,40 @@ export function CwdPicker({
 
   const inProject = looksLikeProject(cwd);
   const label = prettyCwd(cwd);
+  // Worktrees are only needed while the menu is open, so they are read on each
+  // open rather than kept in a subscription the way the branch list is.
+  const showWorktrees = mode === "switch" && inProject;
+  useEffect(() => {
+    if (!open || !showWorktrees) return;
+    let cancelled = false;
+    void gitWorktrees(cwd)
+      .then((list) => {
+        if (!cancelled) setWorktrees(list);
+      })
+      .catch(() => {
+        if (!cancelled) setWorktrees([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, open, showWorktrees]);
+  useEffect(() => {
+    setWorktrees([]);
+  }, [cwd]);
+  // The current folder is the menu header, and a worktree opened earlier is
+  // also a recent project; list each one once, under Worktrees.
+  const otherWorktrees = showWorktrees
+    ? worktrees.filter((entry) => !entry.current)
+    : [];
+  const isWorktreePath = (path: string) =>
+    otherWorktrees.some((entry) => sameProjectPath(entry.path, path));
   // Read the saved rail order on opening, including changes made while Notes is open.
   const projects =
     mode === "move" ? projectRailItems(recents, activeCwd ?? "") : recents;
   const otherRecents = projects.filter(
-    (item) => !inProject || !sameProjectPath(item.path, cwd),
+    (item) =>
+      (!inProject || !sameProjectPath(item.path, cwd)) &&
+      !isWorktreePath(item.path),
   );
   const previewRecents =
     mode === "move" ? otherRecents : otherRecents.slice(0, PREVIEW);
@@ -101,15 +149,19 @@ export function CwdPicker({
     if (mode === "move") activeRef.current?.scrollIntoView({ block: "nearest" });
   }, [active, open, mode]);
 
-  const rows = useMemo((): Row[] => {
-    const out: Row[] = previewRecents.map((item) => ({
-      kind: "recent",
-      path: item.path,
-    }));
-    if (hasMore) out.push({ kind: "more" });
-    if (onNewTerminal) out.push({ kind: "new-terminal" });
-    return out;
-  }, [hasMore, onNewTerminal, previewRecents]);
+  const canAddWorktree = showWorktrees && worktrees.length > 0;
+  // Keyboard order has to match the rendered order: worktrees, recents, the
+  // More submenu, then the footer actions.
+  const rows: Row[] = [
+    ...otherWorktrees.map((entry): Row => ({
+      kind: "worktree",
+      path: entry.path,
+    })),
+    ...previewRecents.map((item): Row => ({ kind: "recent", path: item.path })),
+    ...(hasMore ? [{ kind: "more" } as Row] : []),
+    ...(canAddWorktree ? [{ kind: "new-worktree" } as Row] : []),
+    ...(onNewTerminal ? [{ kind: "new-terminal" } as Row] : []),
+  ];
 
   const dismiss = (restore = false) => {
     setOpen(false);
@@ -141,12 +193,38 @@ export function CwdPicker({
 
   const pick = (row: Row) => {
     if (row.kind === "more") return;
+    if (row.kind === "new-worktree") {
+      // The dialog replaces the menu, so the menu closes without restoring
+      // focus to whatever opened it.
+      dismiss(false);
+      setCreateError(null);
+      setCreateBusy(false);
+      setCreating(true);
+      return;
+    }
     dismiss(true);
     if (row.kind === "new-terminal") {
       onNewTerminal?.();
       return;
     }
     onCwdChange(row.path);
+  };
+
+  const createWorktree = async (branch: string) => {
+    if (createBusy) return;
+    setCreateBusy(true);
+    setCreateError(null);
+    try {
+      const path = await gitAddWorktree(cwd, branch);
+      notifyGitChanged();
+      setCreating(false);
+      setCreateBusy(false);
+      onCloseRef.current?.();
+      onCwdChange(path);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err));
+      setCreateBusy(false);
+    }
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -192,10 +270,12 @@ export function CwdPicker({
     }
   };
 
-  const newTerminalIndex = onNewTerminal
-    ? previewRecents.length + (hasMore ? 1 : 0)
+  const recentsOffset = otherWorktrees.length;
+  const moreIndex = hasMore ? recentsOffset + previewRecents.length : -1;
+  const newWorktreeIndex = canAddWorktree
+    ? recentsOffset + previewRecents.length + (hasMore ? 1 : 0)
     : -1;
-  const moreIndex = hasMore ? previewRecents.length : -1;
+  const newTerminalIndex = onNewTerminal ? rows.length - 1 : -1;
 
   return (
     <div
@@ -277,6 +357,46 @@ export function CwdPicker({
                 </div>
               </>
             ) : null}
+            {otherWorktrees.length > 0 ? (
+              <>
+                <p className="px-2.5 pb-1 pt-2 text-[10px] uppercase tracking-widest text-content/50">
+                  Worktrees
+                </p>
+                {otherWorktrees.map((entry, index) => (
+                  <button
+                    key={entry.path}
+                    ref={active === index ? activeRef : undefined}
+                    type="button"
+                    role="menuitem"
+                    title={entry.path}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onMouseEnter={() => {
+                      setMoreOpen(false);
+                      setActive(index);
+                    }}
+                    onClick={() => pick({ kind: "worktree", path: entry.path })}
+                    className={`flex w-full items-center justify-between gap-3 px-2.5 py-2 text-left ${
+                      active === index
+                        ? "bg-selection text-content"
+                        : "text-content/80 hover:bg-content/5"
+                    }`}
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <GitBranch
+                        className="size-3.5 shrink-0 text-content/45"
+                        strokeWidth={1.75}
+                      />
+                      <span className="min-w-0 truncate text-[13px]">
+                        {worktreeLabel(entry)}
+                      </span>
+                    </span>
+                    <span className="max-w-28 shrink-0 truncate font-mono text-[11px] text-content/45">
+                      {entry.main ? "main worktree" : basename(entry.path)}
+                    </span>
+                  </button>
+                ))}
+              </>
+            ) : null}
             {previewRecents.length > 0 || mode === "move" ? (
               <>
                 <p className="px-2.5 pb-1 pt-2 text-[10px] uppercase tracking-widest text-content/50">
@@ -287,21 +407,23 @@ export function CwdPicker({
                     No other projects
                   </p>
                 ) : null}
-                {previewRecents.map((item, index) => (
+                {previewRecents.map((item, offset) => (
                   <button
                     key={item.path}
-                    ref={active === index ? activeRef : undefined}
+                    ref={
+                      active === recentsOffset + offset ? activeRef : undefined
+                    }
                     type="button"
                     role="menuitem"
                     title={item.path}
                     onMouseDown={(e) => e.stopPropagation()}
                     onMouseEnter={() => {
                       setMoreOpen(false);
-                      setActive(index);
+                      setActive(recentsOffset + offset);
                     }}
                     onClick={() => pick({ kind: "recent", path: item.path })}
                     className={`flex w-full items-center justify-between gap-3 px-2.5 py-2 text-left ${
-                      active === index
+                      active === recentsOffset + offset
                         ? "bg-selection text-content"
                         : "text-content/80 hover:bg-content/5"
                     }`}
@@ -347,31 +469,67 @@ export function CwdPicker({
               </button>
             ) : null}
           </div>
-          {onNewTerminal ? (
+          {canAddWorktree || onNewTerminal ? (
             <div className="shrink-0 border-t border-stroke py-1">
-              <button
-                type="button"
-                role="menuitem"
-                onMouseDown={(e) => e.stopPropagation()}
-                onMouseEnter={() => {
-                  setMoreOpen(false);
-                  setActive(newTerminalIndex);
-                }}
-                onClick={() => pick({ kind: "new-terminal" })}
-                className={`flex w-full items-center justify-between gap-3 px-2.5 py-2 text-left ${
-                  active === newTerminalIndex
-                    ? "bg-selection text-content"
-                    : "text-content/80 hover:bg-content/5"
-                }`}
-              >
-                <span className="text-[13px]">New terminal</span>
-                <span className="shrink-0 font-mono text-[11px] text-content/45">
-                  {MOD}`
-                </span>
-              </button>
+              {canAddWorktree ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onMouseEnter={() => {
+                    setMoreOpen(false);
+                    setActive(newWorktreeIndex);
+                  }}
+                  onClick={() => pick({ kind: "new-worktree" })}
+                  className={`flex w-full items-center gap-2 px-2.5 py-2 text-left ${
+                    active === newWorktreeIndex
+                      ? "bg-selection text-content"
+                      : "text-content/80 hover:bg-content/5"
+                  }`}
+                >
+                  <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+                  <span className="text-[13px]">New worktree</span>
+                </button>
+              ) : null}
+              {onNewTerminal ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onMouseEnter={() => {
+                    setMoreOpen(false);
+                    setActive(newTerminalIndex);
+                  }}
+                  onClick={() => pick({ kind: "new-terminal" })}
+                  className={`flex w-full items-center justify-between gap-3 px-2.5 py-2 text-left ${
+                    active === newTerminalIndex
+                      ? "bg-selection text-content"
+                      : "text-content/80 hover:bg-content/5"
+                  }`}
+                >
+                  <span className="text-[13px]">New terminal</span>
+                  <span className="shrink-0 font-mono text-[11px] text-content/45">
+                    {MOD}`
+                  </span>
+                </button>
+              ) : null}
             </div>
           ) : null}
         </Popover>
+      ) : null}
+      {creating ? (
+        <NewWorktreeDialog
+          cwd={cwd}
+          busy={createBusy}
+          error={createError}
+          onCreate={(branch) => void createWorktree(branch)}
+          onCancel={() => {
+            if (createBusy) return;
+            setCreating(false);
+            setCreateError(null);
+            onCloseRef.current?.();
+          }}
+        />
       ) : null}
       {open && moreOpen ? (
         <Popover

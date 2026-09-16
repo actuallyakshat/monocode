@@ -299,6 +299,8 @@ pub fn run() {
             fs::git_branches,
             fs::git_checkout,
             fs::git_create_branch,
+            fs::git_worktrees,
+            fs::git_add_worktree,
             fs::git_stash,
             fs::create_path,
             fs::rename_path,

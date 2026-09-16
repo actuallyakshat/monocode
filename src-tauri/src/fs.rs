@@ -1134,6 +1134,35 @@ pub async fn git_create_branch(cwd: String, name: String) -> Result<String, Stri
         .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktree {
+    pub path: String,
+    pub branch: Option<String>,
+    pub detached: bool,
+    /// The main working tree, the one the other worktrees were added from.
+    pub main: bool,
+    /// The working tree the caller's `cwd` is inside.
+    pub current: bool,
+}
+
+/// Every working tree of this repository, the main one first.
+#[tauri::command]
+pub async fn git_worktrees(cwd: String) -> Result<Vec<GitWorktree>, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(git_worktrees_for(&expand_home(&cwd))))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Add a working tree for `branch` beside the main one, creating the branch when
+/// it does not exist yet. Returns the new folder.
+#[tauri::command]
+pub async fn git_add_worktree(cwd: String, branch: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || git_add_worktree_for(&expand_home(&cwd), &branch))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Stash tracked and untracked local changes so a checkout can proceed.
 #[tauri::command]
 pub async fn git_stash(cwd: String, message: Option<String>) -> Result<(), String> {
@@ -3514,6 +3543,123 @@ fn git_create_branch_for(root: &Path, name: &str) -> Result<String, String> {
     }
     git_switch(root, &["checkout", "-b", &name])?;
     Ok(name)
+}
+
+fn git_worktrees_for(root: &Path) -> Vec<GitWorktree> {
+    if !git_is_work_tree(root) {
+        return Vec::new();
+    }
+    let current = git_stdout(root, &["rev-parse", "--show-toplevel"]).map(PathBuf::from);
+    let Some(text) = git_run(root, &["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+    let mut out: Vec<GitWorktree> = Vec::new();
+    let mut saw_bare = false;
+    // Records are blank-line separated; `worktree <path>` opens each one.
+    for record in text.split("\n\n") {
+        let mut path: Option<PathBuf> = None;
+        let mut branch = None;
+        let mut detached = false;
+        let mut bare = false;
+        for line in record.lines() {
+            let line = line.trim_end();
+            if let Some(value) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(value));
+            } else if let Some(value) = line.strip_prefix("branch ") {
+                branch = Some(
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value)
+                        .to_string(),
+                );
+            } else if line == "detached" {
+                detached = true;
+            } else if line == "bare" {
+                bare = true;
+            }
+        }
+        // A bare repository has no files to open, so it is not a folder a
+        // session can run in.
+        if bare {
+            saw_bare = true;
+            continue;
+        }
+        let Some(path) = path else { continue };
+        out.push(GitWorktree {
+            current: current.as_deref() == Some(path.as_path()),
+            // `git worktree list` always prints the main working tree first.
+            // A bare repository has no main working tree at all.
+            main: !saw_bare && out.is_empty(),
+            path: path_to_js(&path),
+            branch,
+            detached,
+        });
+    }
+    out
+}
+
+fn git_add_worktree_for(root: &Path, branch: &str) -> Result<String, String> {
+    if !git_is_work_tree(root) {
+        return Err("Not a git repository".into());
+    }
+    let branch = git_branch_name(root, branch)?;
+    let worktrees = git_worktrees_for(root);
+    if let Some(existing) = worktrees
+        .iter()
+        .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
+    {
+        return Err(format!(
+            "Branch {branch} is already checked out at {}",
+            existing.path
+        ));
+    }
+    // Place new worktrees beside the main one, never beside `root`, so adding a
+    // worktree from inside a worktree does not stack suffixes.
+    let main = worktrees
+        .iter()
+        .find(|entry| entry.main)
+        .map(|entry| PathBuf::from(&entry.path))
+        .or_else(|| git_stdout(root, &["rev-parse", "--show-toplevel"]).map(PathBuf::from))
+        .ok_or_else(|| "Could not resolve the repository folder".to_string())?;
+    let parent = main
+        .parent()
+        .ok_or_else(|| "Could not resolve the repository folder".to_string())?;
+    let stem = file_name(&main).unwrap_or_else(|| "repo".to_string());
+    let target = parent.join(format!("{stem}-{}", worktree_folder_suffix(&branch)));
+    if target.exists() {
+        return Err(format!("{} already exists", path_to_js(&target)));
+    }
+    let target_arg = target.to_string_lossy().into_owned();
+    let exists = git_ref_exists(root, &format!("refs/heads/{branch}"));
+    let args: Vec<&str> = if exists {
+        vec!["worktree", "add", &target_arg, &branch]
+    } else {
+        vec!["worktree", "add", "-b", &branch, &target_arg]
+    };
+    git_checked(root, &args)?;
+    Ok(path_to_js(&target))
+}
+
+/// Branch names may contain `/` and other characters a folder name should not
+/// carry, so flatten them to a single path segment.
+fn worktree_folder_suffix(branch: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in branch.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches(['-', '.']).to_string();
+    if trimmed.is_empty() {
+        "worktree".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn git_stash_for(root: &Path, message: Option<&str>) -> Result<(), String> {
@@ -6615,5 +6761,76 @@ mod tests {
             "feature"
         );
         assert_eq!(git_head_branch(&repo.0).as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn git_worktrees_empty_outside_a_repo() {
+        let dir = tmp("git-worktrees-none");
+        std::fs::write(dir.0.join("notes.txt"), "hello\n").unwrap();
+        assert!(git_worktrees_for(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn git_worktrees_list_the_main_tree_first() {
+        let dir = tmp("git-worktrees-main");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        let listed = git_worktrees_for(&dir.0);
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].main);
+        assert!(listed[0].current);
+        assert_eq!(listed[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn git_add_worktree_creates_a_sibling_folder() {
+        let dir = tmp("git-worktrees-add");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        let Ok(added) = git_add_worktree_for(&dir.0, "feat/picker") else {
+            return;
+        };
+        let added = PathBuf::from(&added);
+        // The temp dir can be a symlink, so compare the resolved parents.
+        assert_eq!(
+            added.parent().and_then(|path| path.canonicalize().ok()),
+            dir.0.parent().and_then(|path| path.canonicalize().ok())
+        );
+        let name = file_name(&added).unwrap();
+        let stem = file_name(&dir.0).unwrap();
+        assert_eq!(name, format!("{stem}-feat-picker"));
+        assert!(added.join("a.txt").is_file());
+
+        let listed = git_worktrees_for(&dir.0);
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].main && listed[0].current);
+        let worktree = listed.iter().find(|entry| !entry.main).unwrap();
+        assert_eq!(worktree.branch.as_deref(), Some("feat/picker"));
+        assert!(!worktree.current);
+
+        // The branch is checked out elsewhere now, so a second add has to fail.
+        assert!(git_add_worktree_for(&dir.0, "feat/picker").is_err());
+        assert!(git_add_worktree_for(&dir.0, "bad name").is_err());
+
+        // Adding from inside a worktree still lands beside the main tree.
+        let Ok(second) = git_add_worktree_for(&added, "other") else {
+            return;
+        };
+        assert_eq!(
+            file_name(&PathBuf::from(&second)).unwrap(),
+            format!("{stem}-other")
+        );
+        let _ = std::fs::remove_dir_all(&added);
+        let _ = std::fs::remove_dir_all(PathBuf::from(&second));
+    }
+
+    #[test]
+    fn worktree_folder_suffix_flattens_branch_names() {
+        assert_eq!(worktree_folder_suffix("feat/picker"), "feat-picker");
+        assert_eq!(worktree_folder_suffix("release-1.2"), "release-1.2");
+        assert_eq!(worktree_folder_suffix("a//b"), "a-b");
+        assert_eq!(worktree_folder_suffix("///"), "worktree");
     }
 }

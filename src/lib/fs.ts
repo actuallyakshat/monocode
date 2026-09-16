@@ -312,6 +312,25 @@ export function gitCreateBranch(cwd: string, name: string): Promise<string> {
   return invoke<string>("git_create_branch", { cwd, name });
 }
 
+export type GitWorktree = {
+  path: string;
+  branch: string | null;
+  detached: boolean;
+  /** The main working tree, the one the others were added from. */
+  main: boolean;
+  /** The working tree the requested folder is inside. */
+  current: boolean;
+};
+
+export function gitWorktrees(cwd: string): Promise<GitWorktree[]> {
+  return invoke<GitWorktree[]>("git_worktrees", { cwd });
+}
+
+/** Add a working tree for `branch` beside the main one; returns its folder. */
+export function gitAddWorktree(cwd: string, branch: string): Promise<string> {
+  return invoke<string>("git_add_worktree", { cwd, branch }).then(slash);
+}
+
 export function gitStash(cwd: string, message?: string): Promise<void> {
   return invoke<void>("git_stash", { cwd, message: message ?? null });
 }

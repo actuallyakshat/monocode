@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The project picker lists the repository's git worktrees and switches the chat's folder to the one you pick, so a worktree opened earlier can be continued in a new chat. New worktree adds a branch checkout beside the main project folder and moves the chat into it, leaving the other chats where they are. Closes #249.
+
 ## [0.1.48] - 2026-09-16
 
 ### Added
