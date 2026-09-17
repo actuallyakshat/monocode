@@ -1,6 +1,7 @@
-import { Check, FolderTree, Loader, Plus, Trash2 } from "./icons";
+import { Check, FolderTree, Loader, Plus, Search, Trash2 } from "./icons";
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -46,6 +47,7 @@ export function WorktreePicker({
   onClose,
 }: Props) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -55,6 +57,7 @@ export function WorktreePicker({
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
@@ -71,7 +74,17 @@ export function WorktreePicker({
 
   useEffect(() => {
     if (!open) return;
+    setQuery("");
     setActive(0);
+  }, [open]);
+
+  useEffect(() => {
+    // Popover measures itself off-screen behind `visibility: hidden` before
+    // placing it; focusing during that pass is a no-op in real browsers, so
+    // wait a frame for the popover to actually be visible.
+    if (!open) return;
+    const id = requestAnimationFrame(() => search.current?.focus());
+    return () => cancelAnimationFrame(id);
   }, [open]);
 
   // Flag worktrees with no uncommitted changes and no recent commit, so the
@@ -117,16 +130,38 @@ export function WorktreePicker({
 
   const dismiss = (restore: boolean) => {
     setOpen(false);
+    setQuery("");
     setActive(0);
     setRemoveTarget(null);
     setRemoveError(null);
     if (restore) onCloseRef.current?.();
   };
 
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return all;
+    return all.filter((entry) => {
+      const label = worktreeLabel(entry).toLowerCase();
+      const folder = basename(entry.path).toLowerCase();
+      const path = entry.path.toLowerCase();
+      const branch = entry.branch?.toLowerCase() ?? "";
+      return (
+        label.includes(needle) ||
+        folder.includes(needle) ||
+        path.includes(needle) ||
+        branch.includes(needle)
+      );
+    });
+  }, [all, query]);
+
   const rows: Row[] = [
-    ...all.map((entry): Row => ({ kind: "worktree", entry })),
+    ...filtered.map((entry): Row => ({ kind: "worktree", entry })),
     { kind: "create" },
   ];
+
+  useEffect(() => {
+    setActive((i) => (rows.length === 0 ? 0 : Math.min(i, rows.length - 1)));
+  }, [rows.length]);
 
   const pick = (row: Row) => {
     if (row.kind === "create") {
@@ -189,6 +224,7 @@ export function WorktreePicker({
   };
 
   const onMenuKey = (e: ReactKeyboardEvent<HTMLElement>) => {
+    if (e.target instanceof HTMLInputElement) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((i) => Math.min(rows.length - 1, i + 1));
@@ -196,6 +232,26 @@ export function WorktreePicker({
     }
     if (e.key === "ArrowUp") {
       e.preventDefault();
+      setActive((i) => Math.max(0, i - 1));
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const row = rows[active];
+      if (row && !removeTarget) pick(row);
+    }
+  };
+
+  const onSearchKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (rows.length === 0) return;
+      setActive((i) => Math.min(rows.length - 1, i + 1));
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (rows.length === 0) return;
       setActive((i) => Math.max(0, i - 1));
       return;
     }
@@ -250,10 +306,31 @@ export function WorktreePicker({
           data-worktree-picker
           className="flex flex-col overflow-hidden"
         >
+          <label className="flex shrink-0 items-center gap-2 border-b border-stroke px-2 py-2.5 text-content/50">
+            <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
+            <input
+              ref={search}
+              type="text"
+              value={query}
+              placeholder="Search worktrees..."
+              aria-label="Search worktrees"
+              spellCheck={false}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40"
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setActive(0);
+              }}
+              onKeyDown={onSearchKey}
+            />
+          </label>
           <WorktreeList
-            entries={all}
+            entries={filtered}
             active={active}
             staleByPath={staleByPath}
+            emptyLabel={query.trim() ? "No matching worktrees" : "No worktrees"}
             onActive={setActive}
             onPick={(entry) => pick({ kind: "worktree", entry })}
             onRemove={(entry) => {
@@ -269,8 +346,8 @@ export function WorktreePicker({
                 className="flex flex-col gap-2 rounded-md bg-content/5 p-2"
               >
                 <p className="text-[12px] leading-snug text-content/80">
-                  Remove “{worktreeLabel(removeTarget)}”? The folder is
-                  deleted; the branch is kept.
+                  Remove “{worktreeLabel(removeTarget)}”? The folder will
+                  be deleted; the branch is kept.
                 </p>
                 {removeError ? (
                   <p className="max-h-20 overflow-y-auto whitespace-pre-wrap text-[11px] leading-4 text-red-400/90">
@@ -326,10 +403,10 @@ export function WorktreePicker({
                 role="option"
                 aria-selected={false}
                 onMouseDown={(e) => e.preventDefault()}
-                onMouseEnter={() => setActive(all.length)}
+                onMouseEnter={() => setActive(filtered.length)}
                 onClick={() => pick({ kind: "create" })}
                 className={`flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left ${
-                  active === all.length
+                  active === filtered.length
                     ? "bg-selection-hover text-content"
                     : "text-content/75 hover:bg-selection-hover hover:text-content"
                 }`}
@@ -364,6 +441,7 @@ function WorktreeList({
   entries,
   active,
   staleByPath,
+  emptyLabel,
   onActive,
   onPick,
   onRemove,
@@ -371,6 +449,7 @@ function WorktreeList({
   entries: GitWorktree[];
   active: number;
   staleByPath: Record<string, boolean>;
+  emptyLabel: string;
   onActive: (index: number) => void;
   onPick: (entry: GitWorktree) => void;
   onRemove: (entry: GitWorktree) => void;
@@ -381,6 +460,12 @@ function WorktreeList({
   useEffect(() => {
     activeRef.current?.scrollIntoView({ block: "nearest" });
   }, [active]);
+
+  if (entries.length === 0) {
+    return (
+      <div className="px-3 py-4 text-[12px] text-content/50">{emptyLabel}</div>
+    );
+  }
 
   return (
     <div

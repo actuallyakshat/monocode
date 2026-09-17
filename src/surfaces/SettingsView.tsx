@@ -32,6 +32,7 @@ import { Popover } from "../chrome/Popover";
 import { SecondaryButton } from "../chrome/SecondaryButton";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
 import { RemoveProjectDialog } from "../chrome/RemoveProjectDialog";
+import { RemoveWorktreeDialog } from "../chrome/RemoveWorktreeDialog";
 import { WindowControls } from "../chrome/WindowControls";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useColorScheme } from "../hooks/useColorScheme";
@@ -2195,41 +2196,19 @@ function WorktreesPage({
       </Group>
 
       {target ? (
-        <div
-          role="alertdialog"
-          aria-label={`Remove worktree ${target.branch ?? target.path}`}
-          className="mt-4 flex flex-col gap-2 rounded-lg border border-content/10 bg-content/5 p-4"
-        >
-          <p className="text-[13px] leading-snug text-content">
-            Remove “{target.branch ?? target.path}”? The folder at{" "}
-            <span className="font-mono">{prettyCwd(target.path)}</span> is
-            deleted; the branch is kept.
-          </p>
-          {removeError ? (
-            <p className="max-h-24 overflow-y-auto whitespace-pre-wrap text-[11px] leading-4 text-red-400/90">
-              {removeError}
-            </p>
-          ) : null}
-          <div className="flex justify-end gap-2">
-            <SecondaryButton
-              onClick={() => {
-                if (removeBusy) return;
-                setRemoving(null);
-                setRemoveError(null);
-              }}
-            >
-              Cancel
-            </SecondaryButton>
-            <SecondaryButton onClick={() => void remove(target, false)}>
-              Remove
-            </SecondaryButton>
-            {removeError ? (
-              <SecondaryButton danger onClick={() => void remove(target, true)}>
-                Force
-              </SecondaryButton>
-            ) : null}
-          </div>
-        </div>
+        <RemoveWorktreeDialog
+          name={target.branch ?? target.path}
+          pathPretty={prettyCwd(target.path)}
+          busy={removeBusy}
+          error={removeError}
+          onCancel={() => {
+            if (removeBusy) return;
+            setRemoving(null);
+            setRemoveError(null);
+          }}
+          onConfirm={() => void remove(target, false)}
+          onForce={() => void remove(target, true)}
+        />
       ) : null}
     </>
   );

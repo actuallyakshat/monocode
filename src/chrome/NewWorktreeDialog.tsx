@@ -128,45 +128,46 @@ export function NewWorktreeDialog({
           }}
         />
 
-        <fieldset className="flex flex-col gap-1.5">
+        <fieldset className="flex min-w-0 flex-col gap-1.5">
           <legend className="pb-1 text-[12px] font-medium text-content/80">
             Location for this project
           </legend>
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-content/75">
+          <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[12px] text-content/75">
             <input
               type="radio"
               name="worktree-location"
               checked={mode === "sibling"}
               disabled={busy}
               onChange={() => pickMode("sibling")}
-              className="accent-current"
+              className="shrink-0 accent-current"
             />
-            Beside the repo (default)
+            <span className="min-w-0 flex-1 truncate">
+              Beside the repo (default)
+            </span>
           </label>
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-content/75">
+          <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[12px] text-content/75">
             <input
               type="radio"
               name="worktree-location"
               checked={mode === "central"}
               disabled={busy}
               onChange={() => pickMode("central")}
-              className="accent-current"
+              className="shrink-0 accent-current"
             />
-            <span className="truncate">
-              In {centralPreview} (
-              <span className="font-mono">{centralPreview}</span>)
+            <span className="min-w-0 flex-1 truncate" title={`In ${centralPreview}`}>
+              In <span className="font-mono">{centralPreview}</span>
             </span>
           </label>
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-content/75">
+          <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[12px] text-content/75">
             <input
               type="radio"
               name="worktree-location"
               checked={mode === "custom"}
               disabled={busy}
               onChange={() => pickMode("custom")}
-              className="accent-current"
+              className="shrink-0 accent-current"
             />
-            Custom folder
+            <span className="min-w-0 flex-1 truncate">Custom folder</span>
           </label>
           {mode === "custom" ? (
             <input
@@ -189,7 +190,10 @@ export function NewWorktreeDialog({
               }}
             />
           ) : null}
-          <p className="font-mono text-[11px] leading-4 text-content/40">
+          <p
+            className="truncate font-mono text-[11px] leading-4 text-content/40"
+            title={baseDir ? `Folder goes in ${baseDir}/` : "Folder goes beside the repo"}
+          >
             {baseDir ? `Folder goes in ${baseDir}/` : "Folder goes beside the repo"}
           </p>
         </fieldset>

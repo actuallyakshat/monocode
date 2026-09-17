@@ -3718,10 +3718,23 @@ fn git_remove_worktree_for(root: &Path, target: &Path, force: bool) -> Result<()
     if worktrees.is_empty() {
         return Err("Not a git repository".into());
     }
-    let entry = worktrees
+    let entry = match worktrees
         .iter()
         .find(|entry| PathBuf::from(&entry.path) == target)
-        .ok_or_else(|| "This folder is not a worktree of the current repository.".to_string())?;
+    {
+        Some(entry) => entry,
+        None => {
+            // The folder was deleted outside the app (CLI, file manager): the
+            // cached row is stale but there is nothing left to remove. Treat
+            // this as success so retry clears the row instead of failing
+            // forever on the same "not a worktree" error.
+            if !target.exists() {
+                let _ = git_checked(root, &["worktree", "prune"]);
+                return Ok(());
+            }
+            return Err("This folder is not a worktree of the current repository.".to_string());
+        }
+    };
     if entry.main {
         return Err("The main worktree cannot be removed. Delete the project folder instead.".into());
     }
@@ -7018,8 +7031,14 @@ mod tests {
 
         // The main worktree is never removable.
         assert!(git_remove_worktree_for(&dir.0, &dir.0, false).is_err());
-        // Unknown folders are rejected instead of passed to git.
-        assert!(git_remove_worktree_for(&dir.0, &dir.0.join("missing"), false).is_err());
+        // A folder that exists but was never a worktree is rejected.
+        let not_a_worktree = dir.0.join("plain-folder");
+        let _ = std::fs::create_dir_all(&not_a_worktree);
+        assert!(git_remove_worktree_for(&dir.0, &not_a_worktree, false).is_err());
+        let _ = std::fs::remove_dir_all(&not_a_worktree);
+        // A missing folder means the tree is already gone (deleted via CLI):
+        // removal is idempotent so a stale cached row clears on retry.
+        assert!(git_remove_worktree_for(&dir.0, &dir.0.join("missing"), false).is_ok());
 
         git_remove_worktree_for(&dir.0, &added_path, false).unwrap();
         assert!(!added_path.exists());
