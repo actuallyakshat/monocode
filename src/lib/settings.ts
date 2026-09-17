@@ -10,6 +10,7 @@ export type SettingsSectionId =
   | "providers"
   | "skills"
   | "inbox"
+  | "worktrees"
   | "archive";
 
 /** Rail buckets. Sections list in order under their group label. */
@@ -85,6 +86,14 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     label: "Inbox",
     description: "Manage Inbox services and notification preferences for each project.",
     keywords: "github gitlab linear connect token integration",
+  },
+  {
+    id: "worktrees",
+    group: "workspace",
+    label: "Worktrees",
+    description:
+      "Linked worktrees across projects, with status, size, and removal.",
+    keywords: "worktree git branch checkout folder linked remove",
   },
   {
     id: "archive",
@@ -279,6 +288,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     section: "inbox",
     label: "Linear",
     keywords: "api key issues teams connect",
+  },
+  {
+    id: "worktrees",
+    section: "worktrees",
+    label: "Worktrees",
+    keywords: "worktree git branch checkout folder linked remove stale",
   },
   {
     id: "show-archived",
@@ -763,4 +778,142 @@ export function filterKeybindings(
       row.keys.toLowerCase().includes(needle) ||
       row.when.toLowerCase().includes(needle),
   );
+}
+
+const WORKTREE_LOCATIONS_KEY = "monocode.worktreeLocations.v1";
+
+/** Where new worktrees go for one project. Sibling is the historic default. */
+export type WorktreeLocationMode = "sibling" | "central" | "custom";
+
+export type WorktreeLocation = {
+  mode: WorktreeLocationMode;
+  /** Base folder holding worktrees when `mode` is `custom`. */
+  customDir?: string;
+};
+
+export const WORKTREE_LOCATION_DEFAULT: WorktreeLocation = {
+  mode: "sibling",
+};
+
+/** Fired on `window` when a project's worktree location changes. */
+export const WORKTREE_LOCATION_CHANGE_EVENT =
+  "monocode:worktree-location-change";
+
+function isWorktreeLocationMode(value: unknown): value is WorktreeLocationMode {
+  return value === "sibling" || value === "central" || value === "custom";
+}
+
+function readWorktreeLocations(): Record<string, WorktreeLocation> {
+  try {
+    const raw = localStorage.getItem(WORKTREE_LOCATIONS_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, WorktreeLocation>;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Project identity for the worktree location map. Folder names repeat across
+ * checkouts, so the key is the full main-repository path, lowercased on
+ * Windows drive paths exactly like `projectKey` in `paths.ts`.
+ */
+export function worktreeProjectKey(path: string): string {
+  const normalized = path.replace(/\/+$/, "") || "/";
+  return /^[A-Za-z]:(?:\/|$)/.test(normalized) || normalized.startsWith("//")
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
+/** Last segment of a path, for `~/worktrees/<project>` naming. */
+export function worktreeProjectStem(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const parts = trimmed.split("/").filter(Boolean);
+  const last = parts[parts.length - 1] ?? "repo";
+  return last || "repo";
+}
+
+export function loadWorktreeLocation(projectPath: string): WorktreeLocation {
+  const stored = readWorktreeLocations()[worktreeProjectKey(projectPath)];
+  if (!stored || typeof stored !== "object") return { ...WORKTREE_LOCATION_DEFAULT };
+  if (!isWorktreeLocationMode(stored.mode)) return { ...WORKTREE_LOCATION_DEFAULT };
+  const customDir =
+    typeof stored.customDir === "string" && stored.customDir.trim()
+      ? stored.customDir.trim()
+      : undefined;
+  if (stored.mode === "custom" && !customDir) return { ...WORKTREE_LOCATION_DEFAULT };
+  return customDir ? { mode: stored.mode, customDir } : { mode: stored.mode };
+}
+
+export function saveWorktreeLocation(
+  projectPath: string,
+  value: WorktreeLocation,
+): WorktreeLocation {
+  const next: WorktreeLocation = loadWorktreeLocation(projectPath);
+  next.mode = isWorktreeLocationMode(value.mode)
+    ? value.mode
+    : WORKTREE_LOCATION_DEFAULT.mode;
+  if (next.mode === "custom") {
+    const customDir =
+      typeof value.customDir === "string" ? value.customDir.trim() : "";
+    if (!customDir) {
+      next.mode = "sibling";
+      delete next.customDir;
+    } else {
+      next.customDir = customDir;
+    }
+  } else {
+    delete next.customDir;
+  }
+  try {
+    const all = readWorktreeLocations();
+    all[worktreeProjectKey(projectPath)] = next;
+    localStorage.setItem(WORKTREE_LOCATIONS_KEY, JSON.stringify(all));
+  } catch {
+    // private mode / quota
+  }
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent<string>(WORKTREE_LOCATION_CHANGE_EVENT, {
+        detail: worktreeProjectKey(projectPath),
+      }),
+    );
+  }
+  return { ...next };
+}
+
+/**
+ * Resolve the location setting to a base folder for the Tauri command, or
+ * `null` for the sibling default. `mainPath` is the main worktree folder, so
+ * the central base stays stable when the chat runs inside a linked tree.
+ */
+export function resolveWorktreeBaseDir(
+  projectPath: string,
+  mainPath?: string | null,
+  location?: WorktreeLocation,
+): string | null {
+  // The picker keys the setting by the main worktree, but callers sometimes
+  // pass the linked folder first; fall back to the main path before defaulting.
+  let resolved = location;
+  if (!resolved) {
+    resolved = loadWorktreeLocation(projectPath);
+    const main = mainPath?.trim();
+    if (
+      resolved.mode === "sibling" &&
+      main &&
+      worktreeProjectKey(main) !== worktreeProjectKey(projectPath)
+    ) {
+      resolved = loadWorktreeLocation(main);
+    }
+  }
+  if (resolved.mode === "custom") {
+    return resolved.customDir?.trim() ? resolved.customDir.trim() : null;
+  }
+  if (resolved.mode === "central") {
+    const stem = worktreeProjectStem(mainPath?.trim() ? (mainPath as string) : projectPath);
+    return `~/worktrees/${stem}`;
+  }
+  return null;
 }

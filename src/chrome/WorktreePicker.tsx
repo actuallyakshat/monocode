@@ -1,4 +1,4 @@
-import { Check, FolderTree, Plus } from "./icons";
+import { Check, FolderTree, Loader, Plus, Trash2 } from "./icons";
 import {
   useEffect,
   useRef,
@@ -8,9 +8,13 @@ import {
 import {
   basename,
   gitAddWorktree,
+  gitDiffStats,
+  gitHistory,
+  gitRemoveWorktree,
   notifyGitChanged,
   type GitWorktree,
 } from "../lib/fs";
+import { resolveWorktreeBaseDir } from "../lib/settings";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { markLinkedWorktrees } from "../lib/recents";
 import {
@@ -30,6 +34,8 @@ type Props = {
 
 const MENU_WIDTH = 280;
 const MENU_MAX_HEIGHT = 280;
+/** A clean worktree counts as stale after this long without a commit. */
+const STALE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
 type Row = { kind: "worktree"; entry: GitWorktree } | { kind: "create" };
 
@@ -44,12 +50,19 @@ export function WorktreePicker({
   const [creating, setCreating] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [staleByPath, setStaleByPath] = useState<Record<string, boolean>>({});
+  const [removeTarget, setRemoveTarget] = useState<GitWorktree | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
   const inProject = Boolean(cwd) && cwd !== "~";
   const { all, current, isRepo, refresh } = useProjectWorktrees(cwd, inProject);
+  // The main worktree folder keys the per-project location setting, so the
+  // choice stays stable when the chat runs inside a linked tree.
+  const mainPath = all.find((entry) => entry.main)?.path ?? cwd;
 
   useEffect(() => {
     if (enabled) return;
@@ -61,9 +74,52 @@ export function WorktreePicker({
     setActive(0);
   }, [open]);
 
+  // Flag worktrees with no uncommitted changes and no recent commit, so the
+  // menu names candidates for removal. Lookups run only while the menu is
+  // open and never block switching.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setStaleByPath({});
+    const linked = all.filter((entry) => !entry.main);
+    if (linked.length === 0) return;
+    void (async () => {
+      const flags = await Promise.all(
+        linked.map(async (entry) => {
+          try {
+            const [stats, history] = await Promise.all([
+              gitDiffStats(entry.path),
+              gitHistory(entry.path, 1),
+            ]);
+            const clean =
+              stats.files === 0 &&
+              stats.additions === 0 &&
+              stats.deletions === 0;
+            const last = history.commits[0]?.timestamp ?? 0;
+            const stale =
+              clean &&
+              last > 0 &&
+              Date.now() - last * 1000 > STALE_AFTER_MS;
+            return [entry.path, stale] as const;
+          } catch {
+            return [entry.path, false] as const;
+          }
+        }),
+      );
+      if (!cancelled) {
+        setStaleByPath(Object.fromEntries(flags.filter(([, stale]) => stale)));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, all]);
+
   const dismiss = (restore: boolean) => {
     setOpen(false);
     setActive(0);
+    setRemoveTarget(null);
+    setRemoveError(null);
     if (restore) onCloseRef.current?.();
   };
 
@@ -93,12 +149,16 @@ export function WorktreePicker({
     onCwdChange(row.entry.path);
   };
 
-  const createWorktree = async (branch: string) => {
+  const createWorktree = async (branch: string, baseDir: string | null) => {
     if (createBusy) return;
     setCreateBusy(true);
     setCreateError(null);
     try {
-      const path = await gitAddWorktree(cwd, branch);
+      // The location setting already resolved in the dialog; fall back to the
+      // stored per-project value when an older caller passes null.
+      const resolved =
+        baseDir ?? resolveWorktreeBaseDir(mainPath, mainPath);
+      const path = await gitAddWorktree(cwd, branch, resolved);
       refresh();
       notifyGitChanged();
       setCreating(false);
@@ -108,6 +168,23 @@ export function WorktreePicker({
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err));
       setCreateBusy(false);
+    }
+  };
+
+  const removeWorktree = async (force: boolean) => {
+    const target = removeTarget;
+    if (!target || removeBusy) return;
+    setRemoveBusy(true);
+    setRemoveError(null);
+    try {
+      await gitRemoveWorktree(cwd, target.path, force);
+      setRemoveTarget(null);
+      setRemoveBusy(false);
+      refresh();
+      notifyGitChanged();
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : String(err));
+      setRemoveBusy(false);
     }
   };
 
@@ -125,7 +202,7 @@ export function WorktreePicker({
     if (e.key === "Enter") {
       e.preventDefault();
       const row = rows[active];
-      if (row) pick(row);
+      if (row && !removeTarget) pick(row);
     }
   };
 
@@ -176,35 +253,101 @@ export function WorktreePicker({
           <WorktreeList
             entries={all}
             active={active}
+            staleByPath={staleByPath}
             onActive={setActive}
             onPick={(entry) => pick({ kind: "worktree", entry })}
+            onRemove={(entry) => {
+              setRemoveTarget(entry);
+              setRemoveError(null);
+            }}
           />
           <div className="shrink-0 border-t border-stroke p-1.5">
-            <button
-              type="button"
-              role="option"
-              aria-selected={false}
-              onMouseDown={(e) => e.preventDefault()}
-              onMouseEnter={() => setActive(all.length)}
-              onClick={() => pick({ kind: "create" })}
-              className={`flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left ${
-                active === all.length
-                  ? "bg-selection-hover text-content"
-                  : "text-content/75 hover:bg-selection-hover hover:text-content"
-              }`}
-            >
-              <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
-              <span className="min-w-0 truncate text-[12px]">New worktree</span>
-            </button>
+            {removeTarget ? (
+              <div
+                role="alertdialog"
+                aria-label={`Remove worktree ${worktreeLabel(removeTarget)}`}
+                className="flex flex-col gap-2 rounded-md bg-content/5 p-2"
+              >
+                <p className="text-[12px] leading-snug text-content/80">
+                  Remove “{worktreeLabel(removeTarget)}”? The folder is
+                  deleted; the branch is kept.
+                </p>
+                {removeError ? (
+                  <p className="max-h-20 overflow-y-auto whitespace-pre-wrap text-[11px] leading-4 text-red-400/90">
+                    {removeError}
+                  </p>
+                ) : null}
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={removeBusy}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      if (removeBusy) return;
+                      setRemoveTarget(null);
+                      setRemoveError(null);
+                    }}
+                    className="rounded-md px-2 py-1 text-[12px] text-content/70 hover:bg-content/8 hover:text-content disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={removeBusy}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => void removeWorktree(false)}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-content px-2 py-1 text-[12px] font-medium text-background-base hover:bg-content/80 disabled:opacity-40"
+                  >
+                    {removeBusy ? (
+                      <Loader
+                        className="size-3.5 animate-spin"
+                        strokeWidth={1.75}
+                      />
+                    ) : null}
+                    Remove
+                  </button>
+                  {removeError ? (
+                    <button
+                      type="button"
+                      disabled={removeBusy}
+                      title="Discard uncommitted changes and remove the folder"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => void removeWorktree(true)}
+                      className="rounded-md px-2 py-1 text-[12px] text-red-400/90 hover:bg-content/8 disabled:opacity-40"
+                    >
+                      Force
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                role="option"
+                aria-selected={false}
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setActive(all.length)}
+                onClick={() => pick({ kind: "create" })}
+                className={`flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left ${
+                  active === all.length
+                    ? "bg-selection-hover text-content"
+                    : "text-content/75 hover:bg-selection-hover hover:text-content"
+                }`}
+              >
+                <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+                <span className="min-w-0 truncate text-[12px]">New worktree</span>
+              </button>
+            )}
           </div>
         </Popover>
       ) : null}
       {creating ? (
         <NewWorktreeDialog
           cwd={cwd}
+          projectPath={mainPath}
           busy={createBusy}
           error={createError}
-          onCreate={(branch) => void createWorktree(branch)}
+          onCreate={(branch, baseDir) => void createWorktree(branch, baseDir)}
           onCancel={() => {
             if (createBusy) return;
             setCreating(false);
@@ -220,13 +363,17 @@ export function WorktreePicker({
 function WorktreeList({
   entries,
   active,
+  staleByPath,
   onActive,
   onPick,
+  onRemove,
 }: {
   entries: GitWorktree[];
   active: number;
+  staleByPath: Record<string, boolean>;
   onActive: (index: number) => void;
   onPick: (entry: GitWorktree) => void;
+  onRemove: (entry: GitWorktree) => void;
 }) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const activeRef = useRef<HTMLButtonElement>(null);
@@ -249,6 +396,10 @@ function WorktreeList({
         // The label is already the folder for the main worktree, and a
         // worktree named after its branch repeats it in the path.
         const meta = entry.main ? null : folder === label ? null : folder;
+        // The main tree and the folder this chat runs in stay: removing
+        // either would delete the project itself or the session folder.
+        const removable = !entry.main && !entry.current;
+        const stale = Boolean(staleByPath[entry.path]);
         return (
           <button
             key={entry.path}
@@ -262,7 +413,7 @@ function WorktreeList({
             onClick={() => onPick(entry)}
             // Pointing at a row and being in it are different states, so the
             // hover fill has to sit above the selected one, not equal it.
-            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
+            className={`group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
               highlighted
                 ? "bg-selection-hover text-content"
                 : entry.current
@@ -283,9 +434,40 @@ function WorktreeList({
             <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
               {label}
             </span>
+            {stale ? (
+              <span
+                title="No uncommitted changes and no recent commit"
+                className="shrink-0 rounded-full border border-content/15 px-1.5 py-px text-[10px] text-content/45"
+              >
+                Stale
+              </span>
+            ) : null}
             {meta ? (
               <span className="max-w-24 shrink-0 truncate font-mono text-[10px] text-content/35">
                 {meta}
+              </span>
+            ) : null}
+            {removable ? (
+              <span
+                role="button"
+                tabIndex={-1}
+                title={`Remove worktree ${label}`}
+                aria-label={`Remove worktree ${label}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(entry);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onRemove(entry);
+                  }
+                }}
+                className="grid size-5 shrink-0 place-items-center rounded text-content/35 opacity-0 hover:bg-content/10 hover:text-content focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <Trash2 className="size-3.5" strokeWidth={1.75} />
               </span>
             ) : null}
           </button>

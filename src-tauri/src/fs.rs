@@ -1149,18 +1149,68 @@ pub struct GitWorktree {
 /// Every working tree of this repository, the main one first.
 #[tauri::command]
 pub async fn git_worktrees(cwd: String) -> Result<Vec<GitWorktree>, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(git_worktrees_for(&expand_home(&cwd))))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = expand_home(&cwd);
+        // Project load lists worktrees, so prune here: folders deleted in the
+        // file manager leave metadata behind that `list` would report forever.
+        if git_is_work_tree(&root) {
+            let _ = git_checked(&root, &["worktree", "prune"]);
+        }
+        Ok(git_worktrees_for(&root))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// Add a working tree for `branch` beside the main one, creating the branch when
-/// it does not exist yet. Returns the new folder.
+/// Add a working tree for `branch`, creating the branch when it does not exist
+/// yet. Returns the new folder. `base_dir`, when set, is the resolved
+/// per-project location from the frontend; otherwise the tree sits beside the
+/// main one.
 #[tauri::command]
-pub async fn git_add_worktree(cwd: String, branch: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || git_add_worktree_for(&expand_home(&cwd), &branch))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn git_add_worktree(
+    cwd: String,
+    branch: String,
+    base_dir: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = base_dir.map(|dir| expand_home(&dir));
+        git_add_worktree_for(&expand_home(&cwd), &branch, base.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove the working tree at `path`. The branch itself is kept; only the
+/// linked folder and its git metadata go away. Fails when the tree has
+/// uncommitted changes unless `force` is true.
+#[tauri::command]
+pub async fn git_remove_worktree(
+    cwd: String,
+    path: String,
+    force: Option<bool>,
+) -> Result<(), String> {
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        git_remove_worktree_for(&expand_home(&cwd), &expand_home(&path), force)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Drop stale administrative data for worktrees deleted outside the app.
+#[tauri::command]
+pub async fn git_prune_worktrees(cwd: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = expand_home(&cwd);
+        if !git_is_work_tree(&root) {
+            return Ok(());
+        }
+        // Best effort: a prune failure must not break listing the project.
+        let _ = git_checked(&root, &["worktree", "prune"]);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Stash tracked and untracked local changes so a checkout can proceed.
@@ -3600,7 +3650,11 @@ fn git_worktrees_for(root: &Path) -> Vec<GitWorktree> {
     out
 }
 
-fn git_add_worktree_for(root: &Path, branch: &str) -> Result<String, String> {
+fn git_add_worktree_for(
+    root: &Path,
+    branch: &str,
+    base_dir: Option<&Path>,
+) -> Result<String, String> {
     if !git_is_work_tree(root) {
         return Err("Not a git repository".into());
     }
@@ -3623,11 +3677,22 @@ fn git_add_worktree_for(root: &Path, branch: &str) -> Result<String, String> {
         .map(|entry| PathBuf::from(&entry.path))
         .or_else(|| git_stdout(root, &["rev-parse", "--show-toplevel"]).map(PathBuf::from))
         .ok_or_else(|| "Could not resolve the repository folder".to_string())?;
-    let parent = main
-        .parent()
-        .ok_or_else(|| "Could not resolve the repository folder".to_string())?;
     let stem = file_name(&main).unwrap_or_else(|| "repo".to_string());
-    let target = parent.join(format!("{stem}-{}", worktree_folder_suffix(&branch)));
+    let target = match base_dir {
+        Some(base) => {
+            if base.as_os_str().is_empty() {
+                return Err("Invalid worktree location".into());
+            }
+            std::fs::create_dir_all(base).map_err(|e| e.to_string())?;
+            base.join(format!("{stem}-{}", worktree_folder_suffix(&branch)))
+        }
+        None => {
+            let parent = main
+                .parent()
+                .ok_or_else(|| "Could not resolve the repository folder".to_string())?;
+            parent.join(format!("{stem}-{}", worktree_folder_suffix(&branch)))
+        }
+    };
     if target.exists() {
         return Err(format!("{} already exists", path_to_js(&target)));
     }
@@ -3640,6 +3705,43 @@ fn git_add_worktree_for(root: &Path, branch: &str) -> Result<String, String> {
     };
     git_checked(root, &args)?;
     Ok(path_to_js(&target))
+}
+
+fn git_remove_worktree_for(root: &Path, target: &Path, force: bool) -> Result<(), String> {
+    if !git_is_work_tree(root) {
+        return Err("Not a git repository".into());
+    }
+    // Clear metadata for folders deleted outside the app, so the lookup below
+    // sees the repository as git does.
+    let _ = git_checked(root, &["worktree", "prune"]);
+    let worktrees = git_worktrees_for(root);
+    if worktrees.is_empty() {
+        return Err("Not a git repository".into());
+    }
+    let entry = worktrees
+        .iter()
+        .find(|entry| PathBuf::from(&entry.path) == target)
+        .ok_or_else(|| "This folder is not a worktree of the current repository.".to_string())?;
+    if entry.main {
+        return Err("The main worktree cannot be removed. Delete the project folder instead.".into());
+    }
+    let target_arg = target.to_string_lossy().into_owned();
+    let args: Vec<&str> = if force {
+        vec!["worktree", "remove", "--force", &target_arg]
+    } else {
+        vec!["worktree", "remove", &target_arg]
+    };
+    git_checked(root, &args).map_err(|err| {
+        let lower = err.to_ascii_lowercase();
+        if !force
+            && (lower.contains("untracked files")
+                || lower.contains("uncommitted changes")
+                || lower.contains("modified"))
+        {
+            return format!("{err} Remove again with force to discard these changes.");
+        }
+        err
+    })
 }
 
 /// Branch names may contain `/` and other characters a folder name should not
@@ -4291,6 +4393,80 @@ pub struct PathInfo {
     pub name: String,
     pub size: u64,
     pub is_dir: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirSize {
+    pub bytes: u64,
+    pub files: u64,
+    pub truncated: bool,
+}
+
+const MAX_DIR_SIZE_FILES: usize = 30_000;
+
+/// Total file bytes under a folder, skipping dependency and build folders.
+/// Used for worktree rows; the count caps so one huge checkout cannot stall
+/// the view.
+#[tauri::command(async)]
+pub fn dir_size(path: String) -> Result<DirSize, String> {
+    let root = expand_home(&path);
+    if !root.is_dir() {
+        return Err("Not a folder".into());
+    }
+    let mut bytes = 0u64;
+    let mut files = 0u64;
+    let mut truncated = false;
+    let mut dirs = vec![root];
+    while let Some(dir) = dirs.pop() {
+        let Ok(reader) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for ent in reader {
+            let Ok(ent) = ent else { continue };
+            let name = ent.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name == ".git" {
+                continue;
+            }
+            let file_type = match ent.file_type() {
+                Ok(t) if t.is_symlink() => continue,
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                if skip_walk_dir_name(name) {
+                    continue;
+                }
+                dirs.push(ent.path());
+                continue;
+            }
+            if ignore_file_name(name) {
+                continue;
+            }
+            match ent.metadata() {
+                Ok(meta) if meta.is_file() => {
+                    bytes = bytes.saturating_add(meta.len());
+                    files += 1;
+                    if files >= MAX_DIR_SIZE_FILES as u64 {
+                        truncated = true;
+                        dirs.clear();
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+    }
+    Ok(DirSize {
+        bytes,
+        files,
+        truncated,
+    })
+}
+
+fn ignore_file_name(name: &str) -> bool {
+    name == ".DS_Store"
 }
 
 /// Metadata for files the composer is attaching (picker, drop, paste).
@@ -6791,7 +6967,7 @@ mod tests {
         if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
             return;
         }
-        let Ok(added) = git_add_worktree_for(&dir.0, "feat/picker") else {
+        let Ok(added) = git_add_worktree_for(&dir.0, "feat/picker", None) else {
             return;
         };
         let added = PathBuf::from(&added);
@@ -6813,11 +6989,11 @@ mod tests {
         assert!(!worktree.current);
 
         // The branch is checked out elsewhere now, so a second add has to fail.
-        assert!(git_add_worktree_for(&dir.0, "feat/picker").is_err());
-        assert!(git_add_worktree_for(&dir.0, "bad name").is_err());
+        assert!(git_add_worktree_for(&dir.0, "feat/picker", None).is_err());
+        assert!(git_add_worktree_for(&dir.0, "bad name", None).is_err());
 
         // Adding from inside a worktree still lands beside the main tree.
-        let Ok(second) = git_add_worktree_for(&added, "other") else {
+        let Ok(second) = git_add_worktree_for(&added, "other", None) else {
             return;
         };
         assert_eq!(
@@ -6826,6 +7002,52 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&added);
         let _ = std::fs::remove_dir_all(PathBuf::from(&second));
+    }
+
+    #[test]
+    fn git_remove_worktree_deletes_the_folder_and_keeps_the_branch() {
+        let dir = tmp("git-worktrees-remove");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        let Ok(added) = git_add_worktree_for(&dir.0, "feat/remove", None) else {
+            return;
+        };
+        let added_path = PathBuf::from(&added);
+        assert!(added_path.is_dir());
+
+        // The main worktree is never removable.
+        assert!(git_remove_worktree_for(&dir.0, &dir.0, false).is_err());
+        // Unknown folders are rejected instead of passed to git.
+        assert!(git_remove_worktree_for(&dir.0, &dir.0.join("missing"), false).is_err());
+
+        git_remove_worktree_for(&dir.0, &added_path, false).unwrap();
+        assert!(!added_path.exists());
+        assert!(git_ref_exists(&dir.0, "refs/heads/feat/remove"));
+        assert_eq!(git_worktrees_for(&dir.0).len(), 1);
+    }
+
+    #[test]
+    fn git_add_worktree_uses_a_custom_base_dir() {
+        let dir = tmp("git-worktrees-basedir");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        let base = dir.0.parent().unwrap().join(format!(
+            "wt-base-{}",
+            std::process::id()
+        ));
+        let Ok(added) = git_add_worktree_for(&dir.0, "feat/custom", Some(&base)) else {
+            return;
+        };
+        let added = PathBuf::from(&added);
+        assert_eq!(
+            added.parent().and_then(|path| path.canonicalize().ok()),
+            base.canonicalize().ok()
+        );
+        assert!(added.join("a.txt").is_file());
+        let _ = std::fs::remove_dir_all(&added);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

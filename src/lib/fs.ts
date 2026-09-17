@@ -326,9 +326,32 @@ export function gitWorktrees(cwd: string): Promise<GitWorktree[]> {
   return invoke<GitWorktree[]>("git_worktrees", { cwd });
 }
 
-/** Add a working tree for `branch` beside the main one; returns its folder. */
-export function gitAddWorktree(cwd: string, branch: string): Promise<string> {
-  return invoke<string>("git_add_worktree", { cwd, branch }).then(slash);
+/** Add a working tree for `branch`; returns its folder. `baseDir` is the
+ *  resolved per-project location, or null for the sibling default. */
+export function gitAddWorktree(
+  cwd: string,
+  branch: string,
+  baseDir?: string | null,
+): Promise<string> {
+  return invoke<string>("git_add_worktree", {
+    cwd,
+    branch,
+    baseDir: baseDir ?? null,
+  }).then(slash);
+}
+
+/** Remove a linked worktree folder. The branch itself is kept. */
+export function gitRemoveWorktree(
+  cwd: string,
+  path: string,
+  force = false,
+): Promise<void> {
+  return invoke<void>("git_remove_worktree", { cwd, path, force });
+}
+
+/** Drop metadata for worktree folders deleted outside the app. */
+export function gitPruneWorktrees(cwd: string): Promise<void> {
+  return invoke<void>("git_prune_worktrees", { cwd });
 }
 
 export function gitStash(cwd: string, message?: string): Promise<void> {
@@ -451,6 +474,33 @@ export type FileMtime = {
 export function statFiles(paths: string[]): Promise<FileMtime[]> {
   if (paths.length === 0) return Promise.resolve([]);
   return invoke<FileMtime[]>("stat_files", { paths });
+}
+
+export type PathInfo = {
+  path: string;
+  name: string;
+  size: number;
+  isDir: boolean;
+};
+
+/**
+ * Metadata for existing paths only; missing folders are silently omitted,
+ * which makes the result a folder-existence check for the launch sweep.
+ */
+export function inspectPaths(paths: string[]): Promise<PathInfo[]> {
+  if (paths.length === 0) return Promise.resolve([]);
+  return invoke<PathInfo[]>("inspect_paths", { paths });
+}
+
+export type DirSize = {
+  bytes: number;
+  files: number;
+  truncated: boolean;
+};
+
+/** Total file bytes under a folder, for worktree rows. */
+export function dirSize(path: string): Promise<DirSize> {
+  return invoke<DirSize>("dir_size", { path });
 }
 
 export function readTextFile(path: string): Promise<string> {

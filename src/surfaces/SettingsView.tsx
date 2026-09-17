@@ -143,6 +143,7 @@ import { IS_MAC, IS_WIN } from "../lib/platform";
 import {
   loadArchivedProjects,
   looksLikeProject,
+  knownProjectPaths,
   subscribeArchivedProjects,
   type ArchivedProject,
   type RecentProject,
@@ -226,6 +227,15 @@ import {
 
 import { SkillsPage } from "./SkillsPage";
 import { ProjectNotificationSettings } from "./ProjectNotificationSettings";
+import {
+  useAllWorktrees,
+  type AllWorktreeEntry,
+} from "../hooks/useAllWorktrees";
+import {
+  gitRemoveWorktree,
+  notifyGitChanged,
+  revealPath,
+} from "../lib/fs";
 
 /**
  * The `data-setting-id` Settings should reveal when it opens: one of the ids in
@@ -258,6 +268,8 @@ type Props = {
   onDeleteSession: (sessionId: string) => void;
   onRestoreProject?: (path: string) => void;
   onDeleteProject?: (path: string) => void;
+  /** Switch the composer to a worktree folder from the Worktrees page. */
+  onOpenWorktree?: (path: string) => void;
   onOpenWhatsNew: (version: string) => void;
 };
 
@@ -277,6 +289,7 @@ export function SettingsView({
   onDeleteSession,
   onRestoreProject,
   onDeleteProject,
+  onOpenWorktree,
   onOpenWhatsNew,
 }: Props) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
@@ -399,6 +412,9 @@ export function SettingsView({
                   notificationProjectPath={notificationProjectPath}
                   notificationSettingsRequest={notificationSettingsRequest}
                 />
+              ) : null}
+              {section === "worktrees" ? (
+                <WorktreesPage onOpenWorktree={onOpenWorktree} />
               ) : null}
               {section === "archive" ? (
                 <ArchivePage
@@ -2057,6 +2073,215 @@ function useArchivedProjects(): ArchivedProject[] {
     [],
   );
   return items;
+}
+
+/**
+ * Linked worktrees across every known project. The aggregate is cached and
+ * only rescanned on demand, so opening this page never walks all checkouts.
+ */
+function WorktreesPage({
+  onOpenWorktree,
+}: {
+  onOpenWorktree?: (path: string) => void;
+}) {
+  const [projects] = useState(() => knownProjectPaths());
+  const { entries, loading, refreshedAt, refresh } = useAllWorktrees(
+    projects,
+    true,
+  );
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  const remove = async (entry: AllWorktreeEntry, force: boolean) => {
+    if (removeBusy) return;
+    setRemoveBusy(true);
+    setRemoveError(null);
+    try {
+      await gitRemoveWorktree(entry.project, entry.path, force);
+      setRemoving(null);
+      setRemoveBusy(false);
+      notifyGitChanged();
+      refresh();
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : String(err));
+      setRemoveBusy(false);
+    }
+  };
+
+  const target = removing
+    ? entries.find((entry) => entry.path === removing) ?? null
+    : null;
+
+  return (
+    <>
+      <Group
+        id="worktrees"
+        title="Worktrees across projects"
+        description="Every linked worktree git reports for a known project. The list is cached until you rescan it."
+        action={
+          <SecondaryButton
+            onClick={refresh}
+            aria-label="Rescan worktrees"
+          >
+            <RefreshCw className="size-3.5" strokeWidth={1.75} />
+            {loading ? "Scanning…" : "Rescan"}
+          </SecondaryButton>
+        }
+      >
+        {entries.length === 0 ? (
+          <p className="px-4 py-3.5 text-[12px] text-content/45">
+            {loading
+              ? "Scanning known projects for linked worktrees…"
+              : "No linked worktrees. Create one from the worktree picker in the composer."}
+          </p>
+        ) : (
+          entries.map((entry) => (
+            <div
+              key={entry.path}
+              className="flex items-center gap-3 border-b border-content/5 px-4 py-2.5 last:border-b-0"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-[13px]">
+                    {entry.projectName}
+                  </span>
+                  <span className="shrink-0 font-mono text-[11px] text-content/45">
+                    {entry.branch ?? (entry.detached ? "detached" : "—")}
+                  </span>
+                  {entry.clean == null ? null : entry.clean ? (
+                    <span className="shrink-0 rounded-full border border-content/15 px-1.5 py-px text-[10px] text-content/45">
+                      Clean
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded-full border border-accent/40 px-1.5 py-px text-[10px] text-content/70">
+                      Dirty
+                    </span>
+                  )}
+                </div>
+                <div className="truncate font-mono text-[11px] text-content/40">
+                  {prettyCwd(entry.path)}
+                </div>
+                <div className="text-[11px] text-content/35 tabular-nums">
+                  {formatWorktreeActivity(entry.lastCommit)} ·{" "}
+                  {formatWorktreeSize(entry.sizeBytes, entry.sizeTruncated)}
+                </div>
+              </div>
+              {onOpenWorktree ? (
+                <SecondaryButton onClick={() => onOpenWorktree(entry.path)}>
+                  Open
+                </SecondaryButton>
+              ) : null}
+              <SecondaryButton onClick={() => void revealPath(entry.path)}>
+                Reveal
+              </SecondaryButton>
+              <SecondaryButton
+                danger
+                onClick={() => {
+                  setRemoving(entry.path);
+                  setRemoveError(null);
+                }}
+              >
+                Remove
+              </SecondaryButton>
+            </div>
+          ))
+        )}
+        {refreshedAt ? (
+          <p className="px-4 py-2 text-[11px] text-content/35">
+            Updated {formatWorktreeUpdated(refreshedAt)}
+          </p>
+        ) : null}
+      </Group>
+
+      {target ? (
+        <div
+          role="alertdialog"
+          aria-label={`Remove worktree ${target.branch ?? target.path}`}
+          className="mt-4 flex flex-col gap-2 rounded-lg border border-content/10 bg-content/5 p-4"
+        >
+          <p className="text-[13px] leading-snug text-content">
+            Remove “{target.branch ?? target.path}”? The folder at{" "}
+            <span className="font-mono">{prettyCwd(target.path)}</span> is
+            deleted; the branch is kept.
+          </p>
+          {removeError ? (
+            <p className="max-h-24 overflow-y-auto whitespace-pre-wrap text-[11px] leading-4 text-red-400/90">
+              {removeError}
+            </p>
+          ) : null}
+          <div className="flex justify-end gap-2">
+            <SecondaryButton
+              onClick={() => {
+                if (removeBusy) return;
+                setRemoving(null);
+                setRemoveError(null);
+              }}
+            >
+              Cancel
+            </SecondaryButton>
+            <SecondaryButton onClick={() => void remove(target, false)}>
+              Remove
+            </SecondaryButton>
+            {removeError ? (
+              <SecondaryButton danger onClick={() => void remove(target, true)}>
+                Force
+              </SecondaryButton>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function formatWorktreeActivity(lastCommit: number | null): string {
+  if (!lastCommit) return "Activity unknown";
+  const diffMs = Date.now() - lastCommit * 1000;
+  if (diffMs < 0) return "Active just now";
+  const days = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+  if (days <= 0) return "Active today";
+  if (days === 1) return "Active yesterday";
+  if (days < 30) return `Active ${days} days ago`;
+  try {
+    return `Active ${new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(new Date(lastCommit * 1000))}`;
+  } catch {
+    return "Activity unknown";
+  }
+}
+
+function formatWorktreeUpdated(refreshedAt: number): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(refreshedAt));
+  } catch {
+    return "";
+  }
+}
+
+function formatWorktreeSize(
+  bytes: number | null,
+  truncated: boolean,
+): string {
+  if (bytes == null) return "Size unknown";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const text =
+    unit === 0
+      ? `${Math.round(value)} ${units[unit]}`
+      : `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
+  return truncated ? `${text}+` : text;
 }
 
 function archivedProjectLabel(path: string): string {

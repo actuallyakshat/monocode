@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   COMPOSER_RUNNER_DEFAULT,
+  loadWorktreeLocation,
+  resolveWorktreeBaseDir,
+  saveWorktreeLocation,
   searchSettings,
   SETTINGS_INDEX,
   settingsSectionsByGroup,
@@ -241,6 +244,7 @@ describe("settings navigation", () => {
       "providers",
       "skills",
       "inbox",
+      "worktrees",
       "archive",
     ]);
   });
@@ -257,8 +261,7 @@ describe("settings navigation", () => {
   });
 });
 
-describe("settings search", () => {
-  it("returns nothing for an empty query", () => {
+describe("settings search", () => {  it("returns nothing for an empty query", () => {
     expect(searchSettings("   ")).toEqual([]);
   });
 
@@ -293,5 +296,54 @@ describe("settings search", () => {
 
   it("caps the result list", () => {
     expect(searchSettings("e", 4)).toHaveLength(4);
+  });
+});
+
+const WORKTREE_LOCATIONS_KEY = "monocode.worktreeLocations.v1";
+
+describe("worktree location setting", () => {
+  beforeEach(mockLocalStorage);
+  afterEach(() => {
+    localStorage.removeItem(WORKTREE_LOCATIONS_KEY);
+  });
+
+  it("defaults to a sibling folder", () => {
+    expect(loadWorktreeLocation("/work/repo")).toEqual({ mode: "sibling" });
+    expect(resolveWorktreeBaseDir("/work/repo", "/work/repo")).toBeNull();
+  });
+
+  it("stores a central base per project without sharing it", () => {
+    saveWorktreeLocation("/work/repo", { mode: "central" });
+    expect(loadWorktreeLocation("/work/repo")).toEqual({ mode: "central" });
+    expect(resolveWorktreeBaseDir("/work/repo", "/work/repo")).toBe(
+      "~/worktrees/repo",
+    );
+    expect(loadWorktreeLocation("/work/other")).toEqual({ mode: "sibling" });
+  });
+
+  it("keeps the central base stable from inside a linked tree", () => {
+    saveWorktreeLocation("/work/repo", { mode: "central" });
+    expect(
+      resolveWorktreeBaseDir("/work/repo-feat", "/work/repo"),
+    ).toBe("~/worktrees/repo");
+  });
+
+  it("stores a custom folder per project", () => {
+    saveWorktreeLocation("/work/repo", {
+      mode: "custom",
+      customDir: "  /Volumes/data/worktrees ",
+    });
+    expect(loadWorktreeLocation("/work/repo")).toEqual({
+      mode: "custom",
+      customDir: "/Volumes/data/worktrees",
+    });
+    expect(resolveWorktreeBaseDir("/work/repo", "/work/repo")).toBe(
+      "/Volumes/data/worktrees",
+    );
+  });
+
+  it("falls back to sibling when the custom folder is blank", () => {
+    saveWorktreeLocation("/work/repo", { mode: "custom", customDir: "   " });
+    expect(loadWorktreeLocation("/work/repo")).toEqual({ mode: "sibling" });
   });
 });

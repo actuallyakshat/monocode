@@ -4,12 +4,21 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { GitWorktree } from "../lib/fs";
 
-const worktrees = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn() }));
+const worktrees = vi.hoisted(() => ({
+  list: vi.fn(),
+  add: vi.fn(),
+  remove: vi.fn(),
+  diffStats: vi.fn(),
+  history: vi.fn(),
+}));
 
 vi.mock("../lib/fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/fs")>()),
   gitWorktrees: worktrees.list,
   gitAddWorktree: worktrees.add,
+  gitRemoveWorktree: worktrees.remove,
+  gitDiffStats: worktrees.diffStats,
+  gitHistory: worktrees.history,
   notifyGitChanged: vi.fn(),
 }));
 
@@ -41,6 +50,9 @@ beforeEach(() => {
   forgetProjectWorktrees("/work/repo");
   worktrees.list.mockResolvedValue([MAIN, FEATURE]);
   worktrees.add.mockResolvedValue("/work/repo-feat-next");
+  worktrees.remove.mockResolvedValue(undefined);
+  worktrees.diffStats.mockResolvedValue({ files: 1, additions: 1, deletions: 0 });
+  worktrees.history.mockResolvedValue({ head: "abc", commits: [] });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -125,7 +137,7 @@ it("creates a worktree and moves the session into it", async () => {
   await act(async () => create.click());
   await act(async () => {});
 
-  expect(worktrees.add).toHaveBeenCalledWith("/work/repo", "feat/next");
+  expect(worktrees.add).toHaveBeenCalledWith("/work/repo", "feat/next", null);
   expect(onCwdChange).toHaveBeenCalledWith("/work/repo-feat-next");
 });
 
@@ -160,4 +172,68 @@ it("renders nothing outside a git repository", async () => {
   // The branch chip beside it already reports "No repo"; two such labels in
   // one toolbar would read as two different problems.
   expect(container.querySelector("button")).toBeNull();
+});
+
+it("flags a clean worktree without a recent commit as stale", async () => {
+  worktrees.diffStats.mockResolvedValue({
+    files: 0,
+    additions: 0,
+    deletions: 0,
+  });
+  worktrees.history.mockResolvedValue({
+    head: "abc",
+    commits: [
+      {
+        sha: "abc",
+        shortSha: "abc",
+        parents: [],
+        author: "Ada",
+        timestamp: Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60,
+        subject: "Old",
+        refs: [],
+        head: true,
+      },
+    ],
+  });
+  await render(vi.fn());
+  await openMenu();
+  await act(async () => {});
+
+  expect(option("feat/picker")!.textContent).toContain("Stale");
+});
+
+it("removes a linked worktree after confirmation", async () => {
+  await render(vi.fn());
+  await openMenu();
+
+  const remove = document.querySelector<HTMLElement>(
+    '[aria-label="Remove worktree feat/picker"]',
+  )!;
+  await act(async () => {
+    remove.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+
+  const confirm = [
+    ...document.querySelectorAll<HTMLButtonElement>("button"),
+  ].find((button) => button.textContent === "Remove")!;
+  await act(async () => confirm.click());
+  await act(async () => {});
+
+  expect(worktrees.remove).toHaveBeenCalledWith(
+    "/work/repo",
+    "/work/repo-feat-picker",
+    false,
+  );
+});
+
+it("does not offer removal for the main or current worktree", async () => {
+  await render(vi.fn());
+  await openMenu();
+
+  expect(
+    document.querySelector('[aria-label="Remove worktree main"]'),
+  ).toBeNull();
+  expect(
+    document.querySelector('[aria-label="Remove worktree repo"]'),
+  ).toBeNull();
 });

@@ -64,6 +64,7 @@ import { runUpdateFlow } from "./lib/updater";
 import { displayAttachments, prepareAttachments } from "./lib/attachments";
 import {
   basename,
+  inspectPaths,
   notifyGitChanged,
   pickFolder,
   restoreSessionCheckout,
@@ -231,6 +232,7 @@ import {
 import {
   displayPath,
   isEqualOrInside,
+  pathKey,
   projectName,
   rebasePath,
   resolveWorkspacePath,
@@ -238,10 +240,12 @@ import {
 import { removeProjectData } from "./lib/projectData";
 import {
   archiveProject,
+  dropRecentProject,
   forgetProject,
   lastProjectPath,
   loadRecents,
   looksLikeProject,
+  markLinkedWorktrees,
   normalizeProjectPath,
   projectRailItems,
   rememberProject,
@@ -1464,6 +1468,64 @@ export default function App({
         );
       })
       .catch(() => {});
+  }, []);
+
+  // Once per launch: drop rail entries whose folders no longer exist — a
+  // deleted worktree otherwise restores on every reload, because nothing
+  // re-marks it as linked after the in-memory set is gone — and never
+  // restore into a folder that is gone. Reopening a folder re-adds it, so
+  // a transient miss costs one reopen, not data.
+  const validatedRestoreRef = useRef(false);
+  useEffect(() => {
+    if (validatedRestoreRef.current) return;
+    validatedRestoreRef.current = true;
+    const restoreCwd = projectCwd;
+    const remembered = recents;
+    void (async () => {
+      const candidates: string[] = [];
+      const seen = new Set<string>();
+      for (const path of [
+        restoreCwd,
+        ...remembered.map((item) => item.path),
+      ]) {
+        if (!looksLikeProject(path)) continue;
+        const key = pathKey(normalizeProjectPath(path));
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push(normalizeProjectPath(path));
+      }
+      if (candidates.length === 0) return;
+      const existing = new Set(
+        (await inspectPaths(candidates).catch(() => [])).map((info) =>
+          pathKey(info.path),
+        ),
+      );
+      const missing = candidates.filter(
+        (path) => !existing.has(pathKey(path)),
+      );
+      if (missing.length === 0) return;
+      let next = loadRecents();
+      for (const path of missing) next = dropRecentProject(path);
+      setRecents(next);
+      if (
+        looksLikeProject(restoreCwd) &&
+        missing.some((path) => sameProjectPath(path, restoreCwd))
+      ) {
+        const fallback =
+          next.find((item) => existing.has(pathKey(item.path)))?.path ?? "~";
+        setProjectCwd(fallback);
+        setSessions((prev) =>
+          prev.map((session) =>
+            sameProjectPath(session.cwd, restoreCwd)
+              ? { ...session, cwd: fallback }
+              : session,
+          ),
+        );
+      }
+    })();
+    // Initial restore values only; later project switches re-validate
+    // themselves through the normal open flows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -4191,6 +4253,17 @@ export default function App({
   const onRestoreProject = useCallback(
     (path: string) => {
       setRecents(rememberProject(path));
+      onSelectProject(path);
+    },
+    [onSelectProject],
+  );
+
+  const onOpenWorktree = useCallback(
+    (path: string) => {
+      // A worktree is another folder of a repository the rail already lists,
+      // so opening it must not add a second project entry.
+      markLinkedWorktrees([path]);
+      setSettingsOpen(false);
       onSelectProject(path);
     },
     [onSelectProject],
@@ -7241,6 +7314,7 @@ export default function App({
                 onDeleteProject={(path) =>
                   onRemoveProject(path, { purgeData: true })
                 }
+                onOpenWorktree={onOpenWorktree}
                 onOpenWhatsNew={onOpenWhatsNew}
               />
             ) : null}

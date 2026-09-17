@@ -2,28 +2,69 @@ import { Loader } from "./icons";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { basename } from "../lib/fs";
+import {
+  loadWorktreeLocation,
+  resolveWorktreeBaseDir,
+  saveWorktreeLocation,
+  worktreeProjectStem,
+  type WorktreeLocationMode,
+} from "../lib/settings";
 import { LAYER } from "../lib/layers";
 
 type Props = {
   /** Folder the worktree is added from; only its repository matters. */
   cwd: string;
+  /** Main worktree folder: the settings key and the central-base name source. */
+  projectPath: string;
   busy: boolean;
   error?: string | null;
-  onCreate: (branch: string) => void;
+  onCreate: (branch: string, baseDir: string | null) => void;
   onCancel: () => void;
 };
 
 export function NewWorktreeDialog({
   cwd,
+  projectPath,
   busy,
   error,
   onCreate,
   onCancel,
 }: Props) {
   const [branch, setBranch] = useState("");
+  const [mode, setMode] = useState<WorktreeLocationMode>(
+    () => loadWorktreeLocation(projectPath).mode,
+  );
+  const [customDir, setCustomDir] = useState(
+    () => loadWorktreeLocation(projectPath).customDir ?? "",
+  );
   const inputRef = useRef<HTMLInputElement>(null);
   const trimmed = branch.trim();
-  const canCreate = trimmed.length > 0 && !busy;
+  const customTrimmed = customDir.trim();
+  const canCreate = trimmed.length > 0 && !busy && (mode !== "custom" || customTrimmed.length > 0);
+
+  const pickMode = (next: WorktreeLocationMode) => {
+    setMode(next);
+    saveWorktreeLocation(projectPath, {
+      mode: next,
+      customDir: next === "custom" ? customTrimmed || undefined : undefined,
+    });
+  };
+
+  const changeCustomDir = (value: string) => {
+    setCustomDir(value);
+    if (mode === "custom" && value.trim()) {
+      saveWorktreeLocation(projectPath, { mode, customDir: value.trim() });
+    }
+  };
+
+  const baseDir = resolveWorktreeBaseDir(
+    projectPath,
+    projectPath,
+    mode === "custom"
+      ? { mode, customDir: customTrimmed || undefined }
+      : { mode },
+  );
+  const centralPreview = `~/worktrees/${worktreeProjectStem(projectPath)}/`;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -82,10 +123,76 @@ export function NewWorktreeDialog({
           onKeyDown={(event) => {
             if (event.key === "Enter" && canCreate) {
               event.preventDefault();
-              onCreate(trimmed);
+              onCreate(trimmed, baseDir);
             }
           }}
         />
+
+        <fieldset className="flex flex-col gap-1.5">
+          <legend className="pb-1 text-[12px] font-medium text-content/80">
+            Location for this project
+          </legend>
+          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-content/75">
+            <input
+              type="radio"
+              name="worktree-location"
+              checked={mode === "sibling"}
+              disabled={busy}
+              onChange={() => pickMode("sibling")}
+              className="accent-current"
+            />
+            Beside the repo (default)
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-content/75">
+            <input
+              type="radio"
+              name="worktree-location"
+              checked={mode === "central"}
+              disabled={busy}
+              onChange={() => pickMode("central")}
+              className="accent-current"
+            />
+            <span className="truncate">
+              In {centralPreview} (
+              <span className="font-mono">{centralPreview}</span>)
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-content/75">
+            <input
+              type="radio"
+              name="worktree-location"
+              checked={mode === "custom"}
+              disabled={busy}
+              onChange={() => pickMode("custom")}
+              className="accent-current"
+            />
+            Custom folder
+          </label>
+          {mode === "custom" ? (
+            <input
+              type="text"
+              value={customDir}
+              placeholder="~/worktrees or /Volumes/data/worktrees"
+              aria-label="Custom worktree folder"
+              spellCheck={false}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              disabled={busy}
+              className="w-full rounded-md bg-content/10 px-2 py-1 font-mono text-[12px] leading-5 text-content outline-none placeholder:text-content/35 disabled:opacity-40"
+              onChange={(event) => changeCustomDir(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && canCreate) {
+                  event.preventDefault();
+                  onCreate(trimmed, baseDir);
+                }
+              }}
+            />
+          ) : null}
+          <p className="font-mono text-[11px] leading-4 text-content/40">
+            {baseDir ? `Folder goes in ${baseDir}/` : "Folder goes beside the repo"}
+          </p>
+        </fieldset>
 
         {error ? (
           <p className="max-h-24 overflow-y-auto whitespace-pre-wrap text-[11px] leading-4 text-red-400/90">
@@ -105,7 +212,7 @@ export function NewWorktreeDialog({
           <button
             type="button"
             disabled={!canCreate}
-            onClick={() => onCreate(trimmed)}
+            onClick={() => onCreate(trimmed, baseDir)}
             className="inline-flex items-center gap-1.5 rounded-md bg-content px-3 py-1.5 text-[12px] font-medium text-background-base hover:bg-content/80 disabled:opacity-40"
           >
             {busy ? (

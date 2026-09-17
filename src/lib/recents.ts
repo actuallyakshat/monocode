@@ -34,13 +34,62 @@ export function sameProjectPath(a: string, b: string): boolean {
  *  twice under two names. Read from git, never saved, so it cannot go stale. */
 const LINKED_WORKTREES = new Set<string>();
 
+/**
+ * Linked worktrees from previous sessions. The memory set above is empty
+ * after a reload, so without this a deleted worktree stored in recents would
+ * restore on every launch. Persisted on every mark, capped below.
+ */
+const LINKED_PERSIST_KEY = "monocode.linkedWorktrees.v1";
+const LINKED_PERSIST_MAX = 100;
+
+export function loadLinkedWorktrees(): string[] {
+  try {
+    const raw = localStorage.getItem(LINKED_PERSIST_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const item of parsed) {
+      if (typeof item !== "string" || !item) continue;
+      const path = normalize(item);
+      const key = pathKey(path);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(path);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function saveLinkedWorktrees(paths: string[]) {
+  try {
+    localStorage.setItem(LINKED_PERSIST_KEY, JSON.stringify(paths));
+  } catch {
+    // private mode / quota
+  }
+}
+
 /** Called with the linked worktrees of a repository, the main one excluded. */
 export function markLinkedWorktrees(paths: string[]) {
   for (const path of paths) LINKED_WORKTREES.add(pathKey(normalize(path)));
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const path of [...loadLinkedWorktrees(), ...paths.map(normalize)]) {
+    const key = pathKey(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(path);
+  }
+  saveLinkedWorktrees(next.slice(-LINKED_PERSIST_MAX));
 }
 
 export function isLinkedWorktree(path: string): boolean {
-  return LINKED_WORKTREES.has(pathKey(normalize(path)));
+  const key = pathKey(normalize(path));
+  if (LINKED_WORKTREES.has(key)) return true;
+  return loadLinkedWorktrees().some((entry) => pathKey(entry) === key);
 }
 
 export function loadRecents(): RecentProject[] {
@@ -114,6 +163,20 @@ function dropFromRail(path: string): RecentProject[] {
 export function forgetProject(path: string): RecentProject[] {
   dropArchived(path);
   return dropFromRail(path);
+}
+
+/**
+ * Drops one recents entry without touching pins, order, or archive. Used by
+ * the launch sweep for folders that no longer exist: reopening the folder
+ * re-adds it, so nothing the user still has is lost.
+ */
+export function dropRecentProject(path: string): RecentProject[] {
+  const normalized = normalize(path);
+  const next = loadRecents().filter(
+    (item) => !sameProjectPath(item.path, normalized),
+  );
+  save(next);
+  return next;
 }
 
 /** Removes a project from the rail and files it in the archive (Archive). */

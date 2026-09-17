@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   archiveProject,
+  dropRecentProject,
   forgetProject,
+  isLinkedWorktree,
   loadArchivedProjects,
+  loadLinkedWorktrees,
   loadPinnedProjects,
   loadProjectRailOrder,
   loadRecents,
@@ -217,5 +220,52 @@ describe("archiveProject", () => {
       "/tmp/repo-other",
       "/tmp/repo",
     ]);
+  });
+
+  it("drops one recent entry without touching pins or archive", () => {
+    rememberProject("/tmp/keep");
+    rememberProject("/tmp/gone");
+    savePinnedProjects(["/tmp/gone"]);
+    archiveProject("/tmp/archived");
+
+    expect(dropRecentProject("/tmp/gone").map((item) => item.path)).toEqual([
+      "/tmp/keep",
+    ]);
+    expect(loadRecents().map((item) => item.path)).toEqual(["/tmp/keep"]);
+    expect(loadPinnedProjects()).toEqual(["/tmp/gone"]);
+    expect(loadArchivedProjects().map((item) => item.path)).toEqual([
+      "/tmp/archived",
+    ]);
+  });
+});
+
+describe("linked worktrees across reloads", () => {
+  beforeEach(() => {
+    mockLocalStorage();
+  });
+
+  afterEach(() => {
+    mockLocalStorage();
+  });
+
+  it("persists the mark so the guard survives a reload", () => {
+    markLinkedWorktrees(["/tmp/schemes-quiet"]);
+    expect(loadLinkedWorktrees()).toEqual(["/tmp/schemes-quiet"]);
+
+    // A fresh session has an empty memory set, but the persisted mark still
+    // keeps the deleted worktree out of recents.
+    rememberProject("/tmp/schemes-quiet");
+    expect(loadRecents()).toEqual([]);
+    expect(isLinkedWorktree("/tmp/schemes-quiet")).toBe(true);
+  });
+
+  it("caps the persisted list", () => {
+    markLinkedWorktrees(
+      Array.from({ length: 120 }, (_, index) => `/tmp/wt-${index}`),
+    );
+    const persisted = loadLinkedWorktrees();
+    expect(persisted).toHaveLength(100);
+    expect(persisted).toContain("/tmp/wt-119");
+    expect(persisted).not.toContain("/tmp/wt-0");
   });
 });
